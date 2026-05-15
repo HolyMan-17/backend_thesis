@@ -126,9 +126,8 @@ async def registrar_dispositivo(
     db: AsyncSession = Depends(get_db),
     user: Usuario = Depends(get_current_user),
 ):
-    existing = await obtener_dispositivo_por_mac(db, device_in.mac)
-    if existing:
-        raise ForbiddenException(message="Dispositivo ya registrado", mac=device_in.mac)
+    if await verificar_acceso(db, user.id, device_in.mac):
+        raise ForbiddenException(message="Dispositivo ya registrado a este usuario", mac=device_in.mac)
 
     artefacto = await crear_dispositivo(db, device_in.mac, user.id)
     return DispositivoResponse(

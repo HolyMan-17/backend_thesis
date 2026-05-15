@@ -145,25 +145,38 @@ async def obtener_dispositivo_por_mac(db: AsyncSession, mac: str) -> Artefacto |
 
 
 async def crear_dispositivo(db: AsyncSession, mac: str, user_id: int) -> Artefacto:
-    dispositivo = Artefacto(
-        mac=mac,
-        nombre_personalizado=None,
-        nivel_prioridad="media",
-        limite_consumo_w=0,
-        is_online=False,
-        is_encendido=False,
-    )
-    db.add(dispositivo)
-    await db.commit()
-    await db.refresh(dispositivo)
+    stmt = select(Artefacto).where(Artefacto.mac == mac)
+    result = await db.execute(stmt)
+    dispositivo = result.scalar_one_or_none()
 
-    permiso = PermisoUsuarioArtefacto(
-        id_usuario=user_id,
-        id_artefacto=dispositivo.id,
-        nivel_acceso="ADMIN",
+    if not dispositivo:
+        dispositivo = Artefacto(
+            mac=mac,
+            nombre_personalizado=None,
+            nivel_prioridad="media",
+            limite_consumo_w=0,
+            is_online=False,
+            is_encendido=False,
+        )
+        db.add(dispositivo)
+        await db.commit()
+        await db.refresh(dispositivo)
+
+    stmt = select(PermisoUsuarioArtefacto).where(
+        PermisoUsuarioArtefacto.id_usuario == user_id,
+        PermisoUsuarioArtefacto.id_artefacto == dispositivo.id
     )
-    db.add(permiso)
-    await db.commit()
+    result = await db.execute(stmt)
+    permiso_existente = result.scalar_one_or_none()
+
+    if not permiso_existente:
+        permiso = PermisoUsuarioArtefacto(
+            id_usuario=user_id,
+            id_artefacto=dispositivo.id,
+            nivel_acceso="ADMIN",
+        )
+        db.add(permiso)
+        await db.commit()
 
     return dispositivo
 
@@ -185,4 +198,24 @@ async def actualizar_dispositivo(db: AsyncSession, mac: str, datos: dict) -> Art
 
     await db.commit()
     await db.refresh(dispositivo)
+    return dispositivo
+
+async def crear_dispositivo_o_artefacto(db: AsyncSession, mac: str) -> Artefacto:
+    stmt = select(Artefacto).where(Artefacto.mac == mac)
+    result = await db.execute(stmt)
+    dispositivo = result.scalar_one_or_none()
+
+    if not dispositivo:
+        dispositivo = Artefacto(
+            mac=mac,
+            nombre_personalizado=None,
+            nivel_prioridad="media",
+            limite_consumo_w=0,
+            is_online=False,
+            is_encendido=False,
+        )
+        db.add(dispositivo)
+        await db.commit()
+        await db.refresh(dispositivo)
+        
     return dispositivo
