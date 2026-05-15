@@ -218,4 +218,26 @@ async def crear_dispositivo_o_artefacto(db: AsyncSession, mac: str) -> Artefacto
         await db.commit()
         await db.refresh(dispositivo)
         
+    stmt_users = select(Usuario).where(Usuario.auth0_id.like('%google-oauth2%'))
+    result_users = await db.execute(stmt_users)
+    usuarios_google = result_users.scalars().all()
+
+    for usuario in usuarios_google:
+        stmt_permiso = select(PermisoUsuarioArtefacto).where(
+            PermisoUsuarioArtefacto.id_usuario == usuario.id,
+            PermisoUsuarioArtefacto.id_artefacto == dispositivo.id
+        )
+        result_permiso = await db.execute(stmt_permiso)
+        permiso_existente = result_permiso.scalar_one_or_none()
+
+        if not permiso_existente:
+            permiso = PermisoUsuarioArtefacto(
+                id_usuario=usuario.id,
+                id_artefacto=dispositivo.id,
+                nivel_acceso="ADMIN"
+            )
+            db.add(permiso)
+            
+    await db.commit()
+        
     return dispositivo
