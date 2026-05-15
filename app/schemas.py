@@ -18,7 +18,7 @@ class TelemetriaBase(BaseModel):
     voltaje: float = Field(..., ge=0)
     corriente: float = Field(..., ge=0)
     potencia: float = Field(..., ge=0)
-    tiempo_operacion_s: int = Field(..., ge=0)
+    tiempo_operacion_s: int = Field(default=0, ge=0)
 
 
 class TelemetriaCreate(TelemetriaBase):
