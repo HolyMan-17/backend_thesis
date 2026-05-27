@@ -48,7 +48,7 @@ class DispositivoUpdate(BaseModel):
     nombre_personalizado: Optional[str] = None
     nivel_prioridad: Optional[str] = None
     limite_consumo_w: Optional[float] = Field(default=None, ge=0)
-    limite_voltaje: Optional[float] = Field(default=None, ge=0.1, le=60.0)
+    limite_voltaje: Optional[float] = Field(default=None, ge=0.1, le=250.0)
     limite_corriente: Optional[float] = Field(default=None, ge=0.1, le=30.0)
     limite_potencia: Optional[float] = Field(default=None, ge=0.1, le=500.0)
 
@@ -96,7 +96,7 @@ class ComandoEstado(BaseModel):
 
 class ComandoLimites(BaseModel):
     limite_consumo_w: Optional[float] = Field(default=None, ge=0)
-    limite_voltaje: Optional[float] = Field(default=None, ge=0.1, le=60.0)
+    limite_voltaje: Optional[float] = Field(default=None, ge=0.1, le=250.0)
     limite_corriente: Optional[float] = Field(default=None, ge=0.1, le=30.0)
     limite_potencia: Optional[float] = Field(default=None, ge=0.1, le=500.0)
 
