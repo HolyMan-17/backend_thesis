@@ -1,4 +1,5 @@
-from typing import List
+from typing import List, Optional
+from datetime import datetime, timezone, timedelta
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -15,15 +16,24 @@ from app.schemas import (
     ComandoEstado, ComandoLimites,
     DispositivoEstado, DispositivoLimites, DispositivoEstadoResponse,
     UserSyncRequest,
+    AlertaResponse, AlertaUpdate,
+    EventoResponse,
+    AgregadoResponse, AgregadoQuery,
 )
 from app.crud import (
     crear_telemetria, obtener_telemetria_por_mac,
-    actualizar_estado_dispositivo, obtener_estado_dispositivo,
+    comando_estado_con_lease,
+    actualizar_dispositivo, obtener_dispositivo_por_mac,
+    obtener_estado_dispositivo,
     sincronizar_usuario, verificar_acceso,
-    obtener_dispositivos_usuario, obtener_dispositivo_por_mac,
-    crear_dispositivo, actualizar_dispositivo,
+    obtener_dispositivos_usuario,
+    crear_dispositivo, eliminar_dispositivo,
+    obtener_agregados_telemetria,
+    obtener_alertas_usuario, marcar_alerta_resuelta,
+    crear_evento, obtener_eventos_usuario,
 )
 from app.mqtt_listener import iniciar_oyente_mqtt
+from app.ws_manager import ws_manager
 from app.auth import get_current_user, verify_sync_secret
 from app.exceptions import (
     AppException, NotFoundException, ForbiddenException,
@@ -63,6 +73,27 @@ app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 
+# --- HELPER ---
+
+def artefacto_to_response(artefacto, nivel_acceso: str = "ADMIN") -> DispositivoResponse:
+    limites = artefacto.limites
+    return DispositivoResponse(
+        id=artefacto.id,
+        mac=artefacto.mac,
+        nombre_personalizado=artefacto.nombre_personalizado,
+        nivel_prioridad=artefacto.nivel_prioridad,
+        limite_consumo_w=float(limites.limite_consumo_w) if limites else 0.0,
+        limite_voltaje=float(limites.limite_voltaje) if limites and limites.limite_voltaje is not None else None,
+        limite_corriente=float(limites.limite_corriente) if limites and limites.limite_corriente is not None else None,
+        limite_potencia=float(limites.limite_potencia) if limites and limites.limite_potencia is not None else None,
+        estado_deseado=artefacto.estado_deseado,
+        estado_reportado=artefacto.estado_reportado,
+        is_online=artefacto.is_online,
+        nivel_acceso=nivel_acceso,
+        last_seen_at=artefacto.last_seen_at,
+    )
+
+
 # --- PUBLIC ENDPOINTS ---
 
 @app.get("/health")
@@ -100,24 +131,12 @@ async def registrar_telemetria(
 
 @app.get("/api/dispositivos", response_model=List[DispositivoResponse])
 async def listar_dispositivos(
+    prioridad: Optional[str] = Query(default=None, pattern=r"^P[1-3]$"),
     db: AsyncSession = Depends(get_db),
     user: Usuario = Depends(get_current_user),
 ):
-    rows = await obtener_dispositivos_usuario(db, user.id)
-    result = []
-    for artefacto, nivel_acceso in rows:
-        result.append(DispositivoResponse(
-            id=artefacto.id,
-            mac=artefacto.mac,
-            nombre_personalizado=artefacto.nombre_personalizado,
-            nivel_prioridad=artefacto.nivel_prioridad,
-            limite_consumo_w=float(artefacto.limite_consumo_w),
-            is_online=artefacto.is_online,
-            is_encendido=artefacto.is_encendido,
-            nivel_acceso=nivel_acceso,
-            last_seen_at=artefacto.last_seen_at,
-        ))
-    return result
+    rows = await obtener_dispositivos_usuario(db, user.id, prioridad=prioridad)
+    return [artefacto_to_response(artefacto, nivel_acceso) for artefacto, nivel_acceso in rows]
 
 
 @app.post("/api/dispositivos", response_model=DispositivoResponse, status_code=201)
@@ -130,17 +149,7 @@ async def registrar_dispositivo(
         raise ForbiddenException(message="Dispositivo ya registrado a este usuario", mac=device_in.mac)
 
     artefacto = await crear_dispositivo(db, device_in.mac, user.id)
-    return DispositivoResponse(
-        id=artefacto.id,
-        mac=artefacto.mac,
-        nombre_personalizado=artefacto.nombre_personalizado,
-        nivel_prioridad=artefacto.nivel_prioridad,
-        limite_consumo_w=float(artefacto.limite_consumo_w),
-        is_online=artefacto.is_online,
-        is_encendido=artefacto.is_encendido,
-        nivel_acceso="ADMIN",
-        last_seen_at=artefacto.last_seen_at,
-    )
+    return artefacto_to_response(artefacto)
 
 
 @app.get("/api/dispositivos/{mac}", response_model=DispositivoResponse)
@@ -156,7 +165,6 @@ async def obtener_dispositivo(
     if not row:
         raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
 
-    # Get access level
     rows = await obtener_dispositivos_usuario(db, user.id)
     nivel_acceso = "ADMIN"
     for artefacto, nivel in rows:
@@ -164,17 +172,7 @@ async def obtener_dispositivo(
             nivel_acceso = nivel
             break
 
-    return DispositivoResponse(
-        id=row.id,
-        mac=row.mac,
-        nombre_personalizado=row.nombre_personalizado,
-        nivel_prioridad=row.nivel_prioridad,
-        limite_consumo_w=float(row.limite_consumo_w),
-        is_online=row.is_online,
-        is_encendido=row.is_encendido,
-        nivel_acceso=nivel_acceso,
-        last_seen_at=row.last_seen_at,
-    )
+    return artefacto_to_response(row, nivel_acceso)
 
 
 @app.patch("/api/dispositivos/{mac}", response_model=DispositivoResponse)
@@ -192,17 +190,23 @@ async def actualizar_dispositivo_endpoint(
     if not updated:
         raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
 
-    return DispositivoResponse(
-        id=updated.id,
-        mac=updated.mac,
-        nombre_personalizado=updated.nombre_personalizado,
-        nivel_prioridad=updated.nivel_prioridad,
-        limite_consumo_w=float(updated.limite_consumo_w),
-        is_online=updated.is_online,
-        is_encendido=updated.is_encendido,
-        nivel_acceso="ADMIN",
-        last_seen_at=updated.last_seen_at,
-    )
+    return artefacto_to_response(updated)
+
+
+@app.delete("/api/dispositivos/{mac}")
+async def eliminar_dispositivo_endpoint(
+    mac: str,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not await verificar_acceso(db, user.id, mac):
+        raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    eliminado = await eliminar_dispositivo(db, mac)
+    if not eliminado:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    return {"status": "deleted", "mac": mac}
 
 
 # --- TELEMETRY (under device) ---
@@ -220,6 +224,35 @@ async def leer_telemetria(
     return datos if datos is not None else []
 
 
+@app.get("/api/dispositivos/{mac}/agregados", response_model=List[AgregadoResponse])
+async def obtener_agregados(
+    mac: str,
+    granularity: str = Query(default="hour", pattern=r"^(hour|day)$"),
+    desde: Optional[datetime] = None,
+    hasta: Optional[datetime] = None,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not await verificar_acceso(db, user.id, mac):
+        raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    result = await obtener_agregados_telemetria(db, mac, granularity, desde, hasta)
+    if result is None:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    items = []
+    for row in result:
+        bucket_str = row["bucket"]
+        bucket_dt = datetime.strptime(bucket_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        items.append(AgregadoResponse(
+            bucket=bucket_dt,
+            potencia_promedio_w=float(row["potencia_promedio_w"]) if row["potencia_promedio_w"] is not None else 0.0,
+            potencia_maxima_w=float(row["potencia_maxima_w"]) if row["potencia_maxima_w"] is not None else 0.0,
+            energia_wh=float(row["energia_wh"]) if row["energia_wh"] is not None else 0.0,
+        ))
+    return items
+
+
 # --- COMMANDS (under device) ---
 
 @app.post("/api/dispositivos/{mac}/comando/estado")
@@ -232,8 +265,10 @@ async def comando_estado(
     if not await verificar_acceso(db, user.id, mac):
         raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
 
-    exito_bd = await actualizar_estado_dispositivo(db, mac, comando.encendido)
-    if not exito_bd:
+    dispositivo = await comando_estado_con_lease(
+        db, mac, comando.encendido, duracion_minutos=5, id_usuario=user.id,
+    )
+    if not dispositivo:
         raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
 
     topic = f"smartups/dispositivos/{mac}/comando/estado"
@@ -254,18 +289,62 @@ async def comando_limites(
     if not await verificar_acceso(db, user.id, mac):
         raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
 
-    estado = await obtener_estado_dispositivo(db, mac)
+    estado = await obtener_dispositivo_por_mac(db, mac)
     if estado is None:
         raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
 
-    parametros_actualizados = limites.model_dump(exclude_unset=True)
+    datos = limites.model_dump(exclude_unset=True)
+    if datos:
+        await actualizar_dispositivo(db, mac, datos)
 
     topic = f"smartups/dispositivos/{mac}/comando/limites"
-    payload = json.dumps(parametros_actualizados)
+    payload = json.dumps(datos)
     credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
     publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
 
     return {}
+
+
+# --- ALERTS ---
+
+@app.get("/api/alertas", response_model=List[AlertaResponse])
+async def listar_alertas(
+    solo_activas: bool = True,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    alertas = await obtener_alertas_usuario(db, user.id, solo_activas=solo_activas)
+    return alertas
+
+
+@app.patch("/api/alertas/{alerta_id}", response_model=AlertaResponse)
+async def resolver_alerta(
+    alerta_id: int,
+    alerta_in: AlertaUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not alerta_in.resuelto:
+        raise AppException(error="validation_error", message="Only resolving alerts is supported", status_code=422)
+
+    alerta = await marcar_alerta_resuelta(db, alerta_id, user.id)
+    if not alerta:
+        raise NotFoundException(message="Alerta no encontrada", alerta_id=alerta_id)
+
+    return alerta
+
+
+# --- EVENTS ---
+
+@app.get("/api/eventos", response_model=List[EventoResponse])
+async def listar_eventos(
+    mac: Optional[str] = None,
+    limite: int = 50,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    eventos = await obtener_eventos_usuario(db, user.id, mac=mac, limite=limite)
+    return eventos
 
 
 # --- LEGACY ENDPOINTS (to be removed after frontend migration) ---
@@ -292,8 +371,10 @@ async def comando_estado_legacy(
     if not await verificar_acceso(db, user.id, comando.mac_dispositivo):
         raise ForbiddenException(message="Dispositivo no autorizado", mac=comando.mac_dispositivo)
 
-    exito_bd = await actualizar_estado_dispositivo(db, comando.mac_dispositivo, comando.encendido)
-    if not exito_bd:
+    dispositivo = await comando_estado_con_lease(
+        db, comando.mac_dispositivo, comando.encendido, duracion_minutos=5, id_usuario=user.id,
+    )
+    if not dispositivo:
         raise NotFoundException(message="Dispositivo no encontrado", mac=comando.mac_dispositivo)
 
     topic = f"smartups/dispositivos/{comando.mac_dispositivo}/comando/estado"
@@ -313,11 +394,13 @@ async def comando_limites_legacy(
     if not await verificar_acceso(db, user.id, limites.mac_dispositivo):
         raise ForbiddenException(message="Dispositivo no autorizado", mac=limites.mac_dispositivo)
 
-    estado = await obtener_estado_dispositivo(db, limites.mac_dispositivo)
+    estado = await obtener_dispositivo_por_mac(db, limites.mac_dispositivo)
     if estado is None:
         raise NotFoundException(message="Dispositivo no encontrado", mac=limites.mac_dispositivo)
 
     parametros_actualizados = limites.model_dump(exclude_unset=True, exclude={'mac_dispositivo'})
+    if parametros_actualizados:
+        await actualizar_dispositivo(db, limites.mac_dispositivo, parametros_actualizados)
 
     topic = f"smartups/dispositivos/{limites.mac_dispositivo}/comando/limites"
     payload = json.dumps(parametros_actualizados)
@@ -349,6 +432,7 @@ async def leer_estado_dispositivo_legacy(
 async def websocket_telemetry(
     websocket: WebSocket,
     token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
 ):
     from app.auth import _fetch_jwks, _get_signing_key
     from jose import JWTError, jwt
@@ -372,10 +456,26 @@ async def websocket_telemetry(
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
+    from app.models import Usuario as UsuarioModel
+    from sqlalchemy import select
+
+    stmt = select(UsuarioModel).where(UsuarioModel.auth0_id == auth0_id, UsuarioModel.activo == True)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    if not user:
+        await websocket.close(code=4001, reason="User not found")
+        return
+
+    rows = await obtener_dispositivos_usuario(db, user.id)
+    allowed_macs = {artefacto.mac for artefacto, _ in rows}
+
     await websocket.accept()
+    await ws_manager.connect(websocket, allowed_macs)
+
     try:
         while True:
-            data = await websocket.receive_text()
-            await websocket.send_text(f"Echo: {data}")
+            await websocket.receive_text()
     except WebSocketDisconnect:
         pass
+    finally:
+        await ws_manager.disconnect(websocket)

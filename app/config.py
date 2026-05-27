@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     DB_PORT: str = "3306"
     DB_NAME: str
 
-    MQTT_USER: str = "esp-gateway"
-    MQTT_PASS: str = "wUbcJJiZcLqV3dDo2r9e"
+    MQTT_USER: str
+    MQTT_PASS: str
     MQTT_HOST: str = "127.0.0.1"
     MQTT_PORT: int = 1883
 

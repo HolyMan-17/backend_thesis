@@ -1,7 +1,9 @@
 import time
 import json
 import random
-
+import math
+import torch
+import torch.nn as nn
 import paho.mqtt.client as mqtt
 
 from config import settings
@@ -10,105 +12,127 @@ MAC_ESP32 = "00:1B:44:11:3A:B7"
 
 estado_rele_encendido = True
 tiempo_operacion_s = 0
+ciclos_simulacion = 0 # Para rotar perfiles de carga
 
+# --- 1. DEFINICIÓN DE LA IA ---
+class SmartSaverMLP(nn.Module):
+    def __init__(self):
+        super(SmartSaverMLP, self).__init__()
+        self.fc1 = nn.Linear(4, 16)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Linear(16, 16)
+        self.relu2 = nn.ReLU()
+        self.out = nn.Linear(16, 3)
+        
+    def forward(self, x):
+        x = self.relu1(self.fc1(x))
+        x = self.relu2(self.fc2(x))
+        return self.out(x)
 
+# --- 2. INICIALIZACIÓN GLOBAL ---
+SCALER_MEAN = [1.19815335e+02, 1.93682696e-01, 2.30792778e+01, 4.25903146e+04]
+SCALER_VAR  = [1.55115181e-01, 1.30665406e-01, 1.79889282e+03, 6.18074710e+08]
+
+print("[INIT] Cargando el Cerebro IA...")
+model = SmartSaverMLP()
+model.load_state_dict(torch.load('smartsaver_mlp_weights.pth', map_location=torch.device('cpu')))
+model.eval() # CRÍTICO: Desactiva el modo de entrenamiento
+
+# --- CALLBACKS MQTT ---
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code != 0:
         print(f"[ERROR] Conexion rechazada, codigo: {reason_code}")
         return
-
     print(f"[OK] ESP32 simulador conectado a {settings.MQTT_HOST}:{settings.MQTT_PORT}")
-
     client.subscribe(f"smartups/dispositivos/{MAC_ESP32}/comando/#")
-
+    
     topic_conexion = f"smartups/dispositivos/{MAC_ESP32}/conexion"
-    payload_conexion = json.dumps({"is_online": True})
-    client.publish(topic_conexion, payload_conexion, qos=1, retain=True)
-    print(f"[TX] {topic_conexion} -> is_online=true")
-
-    topic_reporte = f"smartups/dispositivos/{MAC_ESP32}/reporte/estado"
-    payload_estado = json.dumps({"encendido": estado_rele_encendido})
-    client.publish(topic_reporte, payload_estado, qos=1, retain=False)
-    print(f"[TX] {topic_reporte} -> encendido={estado_rele_encendido}")
-
+    client.publish(topic_conexion, json.dumps({"is_online": True}), qos=1, retain=True)
 
 def on_message(client, userdata, msg):
     global estado_rele_encendido
-
     topic = msg.topic
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
     except json.JSONDecodeError:
-        print(f"[WARN] Payload invalido en {topic}: {msg.payload}")
         return
-
-    print(f"\n[RX] {topic}: {payload}")
 
     if "comando/estado" in topic:
         nuevo_estado = payload.get("encendido")
         if nuevo_estado is not None:
             estado_rele_encendido = bool(nuevo_estado)
-            estado_str = "ON" if estado_rele_encendido else "OFF"
-            print(f"[ACT] Rele -> {estado_str}")
+            print(f"[ACT] Rele -> {'ON' if estado_rele_encendido else 'OFF'}")
+            client.publish(f"smartups/dispositivos/{MAC_ESP32}/reporte/estado", 
+                           json.dumps({"encendido": estado_rele_encendido}), qos=1)
 
-            topic_reporte = f"smartups/dispositivos/{MAC_ESP32}/reporte/estado"
-            client.publish(
-                topic_reporte,
-                json.dumps({"encendido": estado_rele_encendido}),
-                qos=1,
-            )
-            print(f"[TX] {topic_reporte} -> encendido={estado_rele_encendido}")
-
-    elif "comando/limites" in topic:
-        print(f"[ACT] Limites actualizados en EEPROM (simulada)")
-        topic_reporte = f"smartups/dispositivos/{MAC_ESP32}/reporte/limites"
-        client.publish(topic_reporte, json.dumps(payload), qos=1)
-        print(f"[TX] {topic_reporte} -> {payload}")
-
-
+# --- MOTOR PRINCIPAL DE SIMULACIÓN E INFERENCIA ---
 def publish_telemetry(client):
-    global tiempo_operacion_s
+    global estado_rele_encendido, tiempo_operacion_s, ciclos_simulacion
 
     if not estado_rele_encendido:
         return
 
     tiempo_operacion_s += 5
+    ciclos_simulacion += 1
 
-    voltaje = round(random.uniform(11.8, 12.5), 2)
-    corriente = round(random.uniform(1.5, 2.0), 2)
-    potencia = round(voltaje * corriente, 2)
+    # 1. SIMULACIÓN FÍSICA AC DINÁMICA
+    # Rotar entre SAFE (Router), RISKY (Laptop), CRITICAL (Cafetera) cada 30 segundos (6 ciclos)
+    if ciclos_simulacion <= 6:
+        potencia = random.uniform(10.0, 15.0)     # SAFE
+    elif ciclos_simulacion <= 12:
+        potencia = random.uniform(80.0, 120.0)    # RISKY
+    elif ciclos_simulacion <= 18:
+        potencia = random.uniform(800.0, 1000.0)  # CRITICAL
+    else:
+        ciclos_simulacion = 0
+        potencia = random.uniform(10.0, 15.0)
 
+    # Física AC: El voltaje cae (sag) según la demanda de potencia, la corriente se deriva
+    ruido = random.uniform(-0.5, 0.5)
+    voltaje = round(120.0 - (potencia * 0.008) + ruido, 2)
+    corriente = round(potencia / voltaje, 3)
+
+    # 2. ESCALADO DE DATOS (StandardScaler)
+    v_scaled = (voltaje - SCALER_MEAN[0]) / math.sqrt(SCALER_VAR[0])
+    i_scaled = (corriente - SCALER_MEAN[1]) / math.sqrt(SCALER_VAR[1])
+    p_scaled = (potencia - SCALER_MEAN[2]) / math.sqrt(SCALER_VAR[2])
+    t_scaled = (tiempo_operacion_s - SCALER_MEAN[3]) / math.sqrt(SCALER_VAR[3])
+
+    # 3. INFERENCIA DE LA RED NEURONAL
+    with torch.no_grad():
+        input_tensor = torch.tensor([v_scaled, i_scaled, p_scaled, t_scaled], dtype=torch.float32)
+        logits = model(input_tensor)
+        ai_class = torch.argmax(logits).item() # Extrae el int: 0, 1, o 2
+
+    print(f"[FÍSICA] {voltaje}V | {corriente}A | {potencia:.2f}W | Estado IA: {ai_class}")
+
+    # 4. LÓGICA DE PROTECCIÓN DE HARDWARE
+    if ai_class == 2:
+        print("\n[!!!] SOBRECARGA CRÍTICA DETECTADA POR IA. APAGANDO RELÉ [!!!]\n")
+        estado_rele_encendido = False
+        topic_alerta = f"smartups/dispositivos/{MAC_ESP32}/alerta"
+        client.publish(topic_alerta, json.dumps({"alerta": "SOBRECARGA_TERMICA", "corte_automatico": True}), qos=2)
+        client.publish(f"smartups/dispositivos/{MAC_ESP32}/reporte/estado", json.dumps({"encendido": False}), qos=1)
+        return # Cortar ejecución, no enviar telemetría normal
+
+    # 5. TRANSMISIÓN DE TELEMETRÍA ESTÁNDAR
     telemetria = {
         "mac_dispositivo": MAC_ESP32,
         "voltaje": voltaje,
         "corriente": corriente,
-        "potencia": potencia,
+        "potencia": round(potencia, 2),
         "tiempo_operacion_s": tiempo_operacion_s,
+        "ai_estado": ai_class
     }
-
-    topic = f"smartups/dispositivos/{MAC_ESP32}/telemetria"
-    client.publish(topic, json.dumps(telemetria), qos=1)
-    print(f"[TX] {voltaje}V {corriente}A {potencia}W uptime={tiempo_operacion_s}s")
-
+    client.publish(f"smartups/dispositivos/{MAC_ESP32}/telemetria", json.dumps(telemetria), qos=1)
 
 def main():
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id="esp32_simulator_1",
-    )
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="esp32_ai_sim")
     client.on_connect = on_connect
     client.on_message = on_message
     client.username_pw_set(username=settings.MQTT_USER, password=settings.MQTT_PASS)
 
-    topic_conexion = f"smartups/dispositivos/{MAC_ESP32}/conexion"
-    client.will_set(
-        topic_conexion,
-        payload=json.dumps({"is_online": False}),
-        qos=1,
-        retain=True,
-    )
-
-    print(f"[INIT] Conectando a {settings.MQTT_HOST}:{settings.MQTT_PORT} ...")
+    print(f"[INIT] Conectando a {settings.MQTT_HOST} ...")
     client.connect(settings.MQTT_HOST, settings.MQTT_PORT, 60)
     client.loop_start()
 
@@ -117,19 +141,11 @@ def main():
             publish_telemetry(client)
             time.sleep(5)
     except KeyboardInterrupt:
-        print("\n[STOP] Desconectando simulador...")
+        pass
     finally:
-        client.publish(
-            topic_conexion,
-            json.dumps({"is_online": False}),
-            qos=1,
-            retain=True,
-        )
-        print(f"[TX] {topic_conexion} -> is_online=false")
+        client.publish(f"smartups/dispositivos/{MAC_ESP32}/conexion", json.dumps({"is_online": False}), qos=1, retain=True)
         client.loop_stop()
         client.disconnect()
-        print("[STOP] Desconectado.")
-
 
 if __name__ == "__main__":
     main()

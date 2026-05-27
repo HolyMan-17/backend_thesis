@@ -53,11 +53,11 @@ def main():
             # 1. Upsert artefacto
             cur.execute(
                 """
-                INSERT INTO artefactos (mac, nombre_personalizado, nivel_prioridad, limite_consumo_w, is_online, is_encendido)
-                VALUES (%s, %s, %s, %s, FALSE, FALSE)
+                INSERT INTO artefactos (mac, nombre_personalizado, nivel_prioridad, estado_deseado, estado_reportado, is_online)
+                VALUES (%s, %s, %s, FALSE, FALSE, FALSE)
                 ON DUPLICATE KEY UPDATE mac = mac
                 """,
-                (args.mac, args.name, args.prioridad, args.limite),
+                (args.mac, args.name, args.prioridad),
             )
             print(f"[OK] Artefacto upserted: {args.mac}")
 
@@ -69,6 +69,17 @@ def main():
                 sys.exit(1)
             artefacto_id = row[0]
             print(f"[OK] Artefacto ID: {artefacto_id}")
+
+            # 2b. Upsert limits
+            cur.execute(
+                """
+                INSERT INTO artefactos_limites (id_artefacto, limite_consumo_w)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE limite_consumo_w = VALUES(limite_consumo_w)
+                """,
+                (artefacto_id, args.limite),
+            )
+            print(f"[OK] Limits upserted for artefacto {artefacto_id}")
 
             # 3. Find user by auth0_id
             cur.execute("SELECT id FROM usuarios WHERE auth0_id = %s AND activo = TRUE", (args.auth0_id,))

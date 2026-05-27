@@ -31,7 +31,6 @@ class Artefacto(Base):
     mac = Column(String(17), unique=True, nullable=False)
     nombre_personalizado = Column(String(100))
     nivel_prioridad = Column(String(10), nullable=False)
-    limite_consumo_w = Column(Numeric(8, 2), nullable=False)
 
     # Device Shadow
     estado_deseado = Column(Boolean, default=False, nullable=False)
@@ -39,19 +38,35 @@ class Artefacto(Base):
 
     # Liveness
     is_online = Column(Boolean, default=False, nullable=False, index=True)
-    is_encendido = Column(Boolean, default=False, server_default="0", nullable=False)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
 
     # Lease Mechanism
     override_activo = Column(Boolean, default=False, nullable=False)
     vencimiento_lease = Column(DateTime(timezone=True), nullable=True)
 
+    # Soft delete
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
     # Cascading Relationships
+    limites = relationship("ArtefactoLimite", uselist=False, cascade="all, delete-orphan")
     permisos_usuario = relationship("PermisoUsuarioArtefacto", back_populates="artefacto", cascade="all, delete-orphan")
     alertas = relationship("AlertaSistema", back_populates="artefacto", cascade="all, delete-orphan")
     credenciales = relationship("CredencialMtls", back_populates="artefacto", cascade="all, delete-orphan")
     despliegues = relationship("DespliegueOta", back_populates="artefacto", cascade="all, delete-orphan")
     eventos = relationship("EventoUsuario", back_populates="artefacto", cascade="all, delete-orphan")
+
+
+class ArtefactoLimite(Base):
+    __tablename__ = 'artefactos_limites'
+
+    id_artefacto = Column(Integer, ForeignKey('artefactos.id', ondelete="CASCADE"), primary_key=True)
+    limite_consumo_w = Column(Numeric(8, 2), nullable=False, default=0)
+    limite_voltaje = Column(Numeric(8, 2), nullable=True)
+    limite_corriente = Column(Numeric(8, 2), nullable=True)
+    limite_potencia = Column(Numeric(8, 2), nullable=True)
+    actualizado_en = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+
+    artefacto = relationship("Artefacto", back_populates="limites")
 
 
 class PermisoUsuarioArtefacto(Base):
@@ -81,6 +96,7 @@ class AlertaSistema(Base):
     mensaje = Column(String(255), nullable=False)
     severidad = Column(String(20), nullable=False)
     leido = Column(Boolean, default=False, nullable=False, index=True)
+    resuelto = Column(Boolean, default=False, nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
     artefacto = relationship("Artefacto", back_populates="alertas")
@@ -138,4 +154,5 @@ class Telemetria(Base):
     corriente = Column(Numeric(8, 2), nullable=False)
     potencia = Column(Numeric(8, 2), nullable=False)
     tiempo_operacion_s = Column(Integer, nullable=False)
+    ai_status = Column(Integer, default=0, nullable=False)
     estado_sin_cambios = Column(Boolean, default=False, nullable=False)

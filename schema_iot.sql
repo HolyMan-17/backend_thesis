@@ -1,8 +1,10 @@
 -- ==============================================================================
--- PROYECTO: Smart Mini-UPS & TinyML IoT Gateway (FINAL V3.0)
+-- PROYECTO: Smart Mini-UPS & TinyML IoT Gateway (V5.0)
 -- MOTOR: MariaDB
 -- DESCRIPCIÓN: Esquema unificado con Telemetría Particionada, Control M2M,
--- Alertas de Sistema, Autenticación Auth0 JWT, y Permisos Usuario-Artefacto.
+--              Alertas de Sistema, Autenticación Auth0 JWT, Permisos Usuario-Artefacto,
+--              Límites normalizados (artefactos_limites), Device Shadow, Lease arbitration,
+--              Soft delete, Alertas con resolución.
 -- ==============================================================================
 
 -- 1. USUARIOS (Auth0 JWT Authentication)
@@ -23,17 +25,28 @@ CREATE TABLE artefactos (
     mac VARCHAR(17) UNIQUE NOT NULL,
     nombre_personalizado VARCHAR(100),
     nivel_prioridad VARCHAR(10) NOT NULL,
-    limite_consumo_w DECIMAL(8,2) NOT NULL,
     estado_deseado BOOLEAN NOT NULL DEFAULT FALSE,
     estado_reportado BOOLEAN NOT NULL DEFAULT FALSE,
     is_online BOOLEAN NOT NULL DEFAULT FALSE,
-    is_encendido BOOLEAN NOT NULL DEFAULT FALSE,
     last_seen_at DATETIME NULL,
     override_activo BOOLEAN NOT NULL DEFAULT FALSE,
-    vencimiento_lease DATETIME NULL
+    vencimiento_lease DATETIME NULL,
+    deleted_at DATETIME NULL,
+    INDEX idx_artefactos_deleted_at (deleted_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 3. PERMISOS USUARIO -> ARTEFACTO (replaces permisos_app_artefacto)
+-- 3. LÍMITES NORMALIZADOS (1:1 con artefactos)
+CREATE TABLE artefactos_limites (
+    id_artefacto INT PRIMARY KEY,
+    limite_consumo_w DECIMAL(8,2) NOT NULL DEFAULT 0,
+    limite_voltaje DECIMAL(8,2) NULL,
+    limite_corriente DECIMAL(8,2) NULL,
+    limite_potencia DECIMAL(8,2) NULL,
+    actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_limites_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 4. PERMISOS USUARIO -> ARTEFACTO (replaces permisos_app_artefacto)
 CREATE TABLE permisos_usuario_artefacto (
     id_usuario INT NOT NULL,
     id_artefacto INT NOT NULL,
@@ -44,7 +57,7 @@ CREATE TABLE permisos_usuario_artefacto (
     CONSTRAINT fk_permiso_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 4. LOG DE ALERTAS DEL SISTEMA
+-- 5. LOG DE ALERTAS DEL SISTEMA
 CREATE TABLE alertas_sistema (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     id_artefacto INT NOT NULL,
@@ -52,11 +65,13 @@ CREATE TABLE alertas_sistema (
     mensaje VARCHAR(255) NOT NULL,
     severidad VARCHAR(20) NOT NULL,
     leido BOOLEAN NOT NULL DEFAULT FALSE,
+    resuelto BOOLEAN NOT NULL DEFAULT FALSE,
     timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_alertas_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE
+    CONSTRAINT fk_alertas_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE,
+    INDEX idx_alertas_resuelto (resuelto)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 5. CREDENCIALES CRIPTOGRÁFICAS M2M
+-- 6. CREDENCIALES CRIPTOGRÁFICAS M2M
 CREATE TABLE credenciales_mtls (
     id INT AUTO_INCREMENT PRIMARY KEY,
     id_artefacto INT NOT NULL,
@@ -67,7 +82,7 @@ CREATE TABLE credenciales_mtls (
     CONSTRAINT fk_credenciales_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 6. GESTIÓN DE ACTUALIZACIONES OTA
+-- 7. GESTIÓN DE ACTUALIZACIONES OTA
 CREATE TABLE despliegues_ota (
     id INT AUTO_INCREMENT PRIMARY KEY,
     id_artefacto INT NOT NULL,
@@ -79,7 +94,7 @@ CREATE TABLE despliegues_ota (
     CONSTRAINT fk_ota_artefacto FOREIGN KEY (id_artefacto) REFERENCES artefactos(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 7. DATASET DE ENTRENAMIENTO EMBEBIDO
+-- 8. DATASET DE ENTRENAMIENTO EMBEBIDO
 CREATE TABLE eventos_usuario (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     id_artefacto INT NOT NULL,
@@ -91,7 +106,7 @@ CREATE TABLE eventos_usuario (
     CONSTRAINT fk_eventos_usuario FOREIGN KEY (id_usuario) REFERENCES usuarios(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 8. SERIES TEMPORALES DE ALTA FRECUENCIA
+-- 9. SERIES TEMPORALES DE ALTA FRECUENCIA
 CREATE TABLE telemetria (
     id BIGINT AUTO_INCREMENT,
     id_artefacto INT NOT NULL,
@@ -101,7 +116,7 @@ CREATE TABLE telemetria (
     potencia DECIMAL(8,2) NOT NULL,
     tiempo_operacion_s INT NOT NULL,
     estado_sin_cambios BOOLEAN NOT NULL DEFAULT FALSE,
-    PRIMARY KEY (id, timestamp) 
+    PRIMARY KEY (id, timestamp)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 PARTITION BY RANGE (YEAR(timestamp) * 100 + MONTH(timestamp)) (
     PARTITION p202605 VALUES LESS THAN (202606),
@@ -142,8 +157,27 @@ PARTITION BY RANGE (YEAR(timestamp) * 100 + MONTH(timestamp)) (
 -- ==============================================================================
 -- MIGRATION NOTES (for existing databases)
 -- ==============================================================================
--- 1. CREATE TABLE usuarios (see above)
--- 2. CREATE TABLE permisos_usuario_artefacto (see above)
--- 3. ALTER TABLE eventos_usuario ADD COLUMN id_usuario INT NULL AFTER id_artefacto;
--- 4. ALTER TABLE eventos_usuario ADD CONSTRAINT fk_eventos_usuario FOREIGN KEY (id_usuario) REFERENCES usuarios(id) ON DELETE SET NULL;
--- 5. ALTER TABLE artefactos ADD COLUMN is_encendido BOOLEAN NOT NULL DEFAULT FALSE AFTER is_online;
+-- V2.1 → V3.0:
+--   1. CREATE TABLE usuarios (see above)
+--   2. CREATE TABLE permisos_usuario_artefacto (see above)
+--   3. ALTER TABLE eventos_usuario ADD COLUMN id_usuario INT NULL AFTER id_artefacto;
+--   4. ALTER TABLE eventos_usuario ADD CONSTRAINT fk_eventos_usuario FOREIGN KEY (id_usuario) REFERENCES usuarios(id) ON DELETE SET NULL;
+--   5. ALTER TABLE artefactos ADD COLUMN is_encendido BOOLEAN NOT NULL DEFAULT FALSE AFTER is_online;
+--
+-- V3.0 → V4.0 (see migration_v4.sql for idempotent DDL):
+--   1. ALTER TABLE artefactos ADD COLUMN deleted_at DATETIME NULL;
+--   2. CREATE INDEX idx_artefactos_deleted_at ON artefactos(deleted_at);
+--   3. ALTER TABLE artefactos ADD COLUMN limite_voltaje DECIMAL(8,2) NULL AFTER limite_consumo_w;
+--   4. ALTER TABLE artefactos ADD COLUMN limite_corriente DECIMAL(8,2) NULL AFTER limite_voltaje;
+--   5. ALTER TABLE artefactos ADD COLUMN limite_potencia DECIMAL(8,2) NULL AFTER limite_corriente;
+--   6. ALTER TABLE alertas_sistema ADD COLUMN resuelto BOOLEAN NOT NULL DEFAULT FALSE AFTER leido;
+--   7. CREATE INDEX idx_alertas_resuelto ON alertas_sistema(resuelto);
+--
+-- V4.0 → V5.0 (see migration_v5.sql for idempotent DDL):
+--   1. CREATE TABLE artefactos_limites (...)
+--   2. INSERT INTO artefactos_limites SELECT id, limite_consumo_w, limite_voltaje, limite_corriente, limite_potencia FROM artefactos;
+--   3. ALTER TABLE artefactos DROP COLUMN limite_consumo_w;
+--   4. ALTER TABLE artefactos DROP COLUMN limite_voltaje;
+--   5. ALTER TABLE artefactos DROP COLUMN limite_corriente;
+--   6. ALTER TABLE artefactos DROP COLUMN limite_potencia;
+--   7. ALTER TABLE artefactos DROP COLUMN is_encendido;
