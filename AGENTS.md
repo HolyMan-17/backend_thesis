@@ -36,6 +36,7 @@ sudo mysql iot_telemetry < migration_v6.sql
 - `app/auth.py` — Auth0 JWT validation + user sync secret verification
 - `app/exceptions.py` — Structured error response handler
 - `app/mqtt_listener.py` — MQTT subscriber (background thread via FastAPI lifespan)
+- `app/recommendation_engine.py` — AI recommendation background task (asyncio, scans telemetry periodically)
 - `app/ws_manager.py` — WebSocket connection manager (device-filtered broadcasts)
 - `app/mock_esp32.py` — Standalone ESP32 simulator script
 - `app/__init__.py` — Package marker (empty)
@@ -43,6 +44,9 @@ sudo mysql iot_telemetry < migration_v6.sql
 - `migration_v3.sql` — Idempotent migration V2.1 → V3.0 (adds Auth0 tables)
 - `migration_v4.sql` — Idempotent migration V3.0 → V4.0 (soft delete, persistent limits, alert resolution)
 - `migration_v5.sql` — Idempotent migration V4.0 → V5.0 (limits normalized to `artefactos_limites`, device shadow consolidated)
+- `migration_v6.sql` — Idempotent migration V5.0 → V6.0 (adds `ai_status` to telemetria)
+- `migration_v7.sql` — Idempotent migration V6.0 → V7.0 (adds `recomendaciones` table)
+- `migration_v8.sql` — Idempotent migration V7.0 → V8.0 (adds AI control fields to artefactos)
 - `requirements.txt` — Pinned dependencies
 - `scripts/seed_test_device.py` — Seed test device + user permission
 
@@ -188,6 +192,72 @@ All `/api/*` endpoints require JWT Bearer auth (except `GET /health` and `POST /
 - On receipt: `emergencia_bms_shutdown()` forces both `estado_deseado` and `estado_reportado` to OFF, breaks any active user lease, creates a `bms_critica` alert (severity `"critica"`), logs a `safety_override` event, and broadcasts via WebSocket
 - Deduplicated: only one active `bms_critica` alert per device at a time
 
+### AI-based Recommendations (`recomendaciones`)
+- Background asyncio task (`app/recommendation_engine.py`) runs every 60s (configurable via `RECOMMENDATION_SCAN_INTERVAL`)
+- Scans all online, non-deleted devices; evaluates telemetry over configurable time windows
+- Mirrors `alertas_sistema` pattern: one active recommendation per `(device, type)`, deduplicated
+- Hybrid resolution: auto-resolves when condition clears, users can also dismiss manually
+- Types:
+  - `consumo_riesgo_sostenido` — avg ai_status ≥ 1 over 5 min (tolerates 1-2 blips); suggests `turn_off`
+  - `oscilacion_frecuente` — 5+ ai_status transitions in 30 min; suggests `investigate`
+  - `recuperacion_consumo` — sustained SAFE after resolved RISKY episode; informational (no action)
+  - `fluctuacion_voltaje` — avg voltage < 105V for 5+ min OR 3+ sags in 30 min; suggests `turn_off`
+- Auto-resolve conditions:
+  - `consumo_riesgo_sostenido` resolves when avg ai_status < 1 over 5 min
+  - `oscilacion_frecuente` resolves when < 2 transitions in 30 min
+  - `recuperacion_consumo` never auto-resolves (user must dismiss)
+  - `fluctuacion_voltaje` resolves when avg voltage > 105V for 5+ min
+- Bleeds over from brownouts/sags common in 110-120V grids (Venezuela)
+- `GET /api/recomendaciones` — list recommendations (optional `?solo_activas=true`)
+- `PATCH /api/recomendaciones/{id}` — dismiss recommendation (sets `resolucion="manual"`)
+- Config via env vars: `RECOMMENDATION_SCAN_INTERVAL`, `RECOMMENDATION_SUSTAINED_RISKY_MIN`, `RECOMMENDATION_OSCILLATION_WINDOW_MIN`, `RECOMMENDATION_OSCILLATION_THRESHOLD`, `RECOMMENDATION_RECOVERY_SAFE_MIN`, `RECOMMENDATION_VOLTAGE_BROWNOUT`, `RECOMMENDATION_VOLTAGE_SAG_COUNT`, `RECOMMENDATION_RECOVERY_LOOKBACK_HOURS`
+
+### AI Control (Master AI Control + Auto-Kill)
+
+**User-level global settings** (stored on `usuarios`):
+
+- `ai_control_habilitado` (boolean, default FALSE) — When TRUE, the AI can autonomously turn off any device the user owns after a grace period if sustained RISKY consumption is detected
+- `auto_apagado_low_priority` (boolean, default FALSE) — When TRUE, any P3 device the user owns will be immediately turned off when RISKY is detected (no grace period). **Independent of `ai_control_habilitado`.**
+
+**Device-level scheduling state** (stored on `artefactos`):
+
+- `auto_kill_at` (timestamp, nullable) — When set, the device will be auto-killed at this time (5-minute grace period)
+- `ai_override_until` (timestamp, nullable) — When set, AI auto-kill is paused for this device until this timestamp (30-minute cooldown after user override)
+
+**Flow for `ai_control_habilitado = TRUE`:**
+1. Detection: AI classifies device as RISKY (`ai_status ≥ 1`) for 2+ minutes (configurable via `AI_CONTROL_RISKY_THRESHOLD_MIN`)
+2. Warning: Backend sets `auto_kill_at = NOW() + 5 minutes` and pushes `auto_kill_warning` WebSocket event
+3. User Override: Frontend calls `POST /api/dispositivos/{mac}/ai-control/override` — clears `auto_kill_at`, sets `ai_override_until = NOW() + 30 min`
+4. Execution: If 5 minutes pass without override, backend automatically publishes `{"encendido": false}` to MQTT, clears `auto_kill_at`, pushes `auto_kill_executed` WebSocket event
+5. Recovery: If condition clears before kill, `auto_kill_at` is cleared and `auto_kill_cancelled` is pushed
+
+**Flow for `auto_apagado_low_priority = TRUE` AND `nivel_prioridad = 'P3'`:**
+1. Detection: Same 2-minute sustained RISKY check
+2. Execution: **Immediate** — no grace period, device is turned off right away
+3. Event: `auto_kill_executed` WebSocket event pushed
+
+**Priority:** P3 auto-kill takes precedence over AI control grace period. If both conditions are met, the device is killed immediately.
+
+**Override endpoint:** `POST /api/dispositivos/{mac}/ai-control/override`
+- Requires JWT auth + device access
+- Clears `auto_kill_at` and sets `ai_override_until = NOW() + 30 min`
+- The AI will not set a new `auto_kill_at` until `ai_override_until` expires
+- Creates an `ai_override` audit event
+
+**Settings endpoints:**
+- `GET /api/users/settings` — Returns `{ai_control_habilitado, auto_apagado_low_priority}`
+- `PATCH /api/users/settings` — Update global AI control toggles
+
+**Config via env vars:**
+- `AI_CONTROL_RISKY_THRESHOLD_MIN` (default 2) — Minutes of sustained RISKY to trigger auto-kill
+- `AI_CONTROL_GRACE_PERIOD_MIN` (default 5) — Minutes between warning and execution
+- `AI_CONTROL_OVERRIDE_COOLDOWN_MIN` (default 30) — Minutes AI auto-kill is paused after user override
+
+**WebSocket event types:**
+- `auto_kill_warning` — Grace period started (includes `auto_kill_at`, `grace_period_min`, `message`, `accion_sugerida: "keep_on"`)
+- `auto_kill_executed` — Device was auto-killed (includes `message`)
+- `auto_kill_cancelled` — Condition cleared before kill (includes `message`)
+
 ### Telemetry aggregates (`GET /api/dispositivos/{mac}/agregados`)
 - SQL GROUP BY with hour/day buckets
 - Returns: `bucket`, `potencia_promedio_w`, `potencia_maxima_w`, `energia_wh`
@@ -210,6 +280,11 @@ RESTful resources with MAC in URL path:
 - `GET /api/dispositivos/{mac}/agregados` — telemetry aggregates
 - `GET /api/alertas` — list alerts
 - `PATCH /api/alertas/{alerta_id}` — resolve alert
+- `GET /api/recomendaciones` — list recommendations (optional `?solo_activas=true`)
+- `PATCH /api/recomendaciones/{id}` — dismiss recommendation
+- `GET /api/users/settings` — Returns `{ai_control_habilitado, auto_apagado_low_priority}`
+- `PATCH /api/users/settings` — Update global AI control toggles
+- `POST /api/dispositivos/{mac}/ai-control/override` — override auto-kill (cancel + cooldown)
 - `GET /api/eventos` — list events
 
 Legacy paths still work during transition:
@@ -246,3 +321,5 @@ Planned: pytest + pytest-asyncio + httpx AsyncClient + Docker MariaDB for integr
 | V3.0 → V4.0 | `migration_v4.sql` | Soft delete, persistent limits, alert resolution |
 | V4.0 → V5.0 | `migration_v5.sql` | Limits normalized to `artefactos_limites`, `is_encendido` dropped, device shadow consolidated (`estado_deseado`/`estado_reportado`), lease arbitration added |
 | V5.0 → V6.0 | `migration_v6.sql` | Adds `ai_status` integer column to `telemetria` (Edge-AI BMS classification: 0=SAFE, 1=RISKY, 2=CRITICAL) |
+| V6.0 → V7.0 | `migration_v7.sql` | Adds `recomendaciones` table (AI-based usage recommendations) |
+| V7.0 → V8.0 | `migration_v8.sql` | Adds `ai_control_habilitado`, `auto_apagado_low_priority` to `usuarios` (global); `auto_kill_at`, `ai_override_until` to `artefactos` (per-device scheduling) |

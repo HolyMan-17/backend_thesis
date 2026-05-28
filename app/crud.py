@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone, timedelta
 from app.models import (
     Artefacto, ArtefactoLimite, Telemetria, Usuario, PermisoUsuarioArtefacto,
-    AlertaSistema, EventoUsuario,
+    AlertaSistema, EventoUsuario, Recomendacion,
 )
 from app.schemas import TelemetriaCreate, UserSyncRequest
 
@@ -185,6 +185,179 @@ async def actualizar_online_dispositivo(db: AsyncSession, mac: str, online: bool
         await db.commit()
 
         return True
+    except Exception:
+        await db.rollback()
+        raise
+
+
+# ---------------------------------------------------------------------------
+# RECOMMENDATIONS
+# ---------------------------------------------------------------------------
+
+async def crear_recomendacion_si_necesario(
+    db: AsyncSession,
+    id_artefacto: int,
+    tipo_recomendacion: str,
+    mensaje: str,
+    accion_sugerida: str | None,
+    severidad: str,
+) -> Recomendacion | None:
+    try:
+        stmt = select(Recomendacion).where(
+            Recomendacion.id_artefacto == id_artefacto,
+            Recomendacion.tipo_recomendacion == tipo_recomendacion,
+            Recomendacion.resuelto == False,
+        )
+        result = await db.execute(stmt)
+        existente = result.scalar_one_or_none()
+
+        if existente:
+            return None
+
+        recomendacion = Recomendacion(
+            id_artefacto=id_artefacto,
+            tipo_recomendacion=tipo_recomendacion,
+            mensaje=mensaje,
+            accion_sugerida=accion_sugerida,
+            severidad=severidad,
+        )
+        db.add(recomendacion)
+        await db.commit()
+        await db.refresh(recomendacion)
+        return recomendacion
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def resolver_recomendacion_auto(
+    db: AsyncSession,
+    id_artefacto: int,
+    tipo_recomendacion: str,
+) -> int:
+    try:
+        stmt = (
+            select(Recomendacion)
+            .where(
+                Recomendacion.id_artefacto == id_artefacto,
+                Recomendacion.tipo_recomendacion == tipo_recomendacion,
+                Recomendacion.resuelto == False,
+            )
+        )
+        result = await db.execute(stmt)
+        recomendaciones = result.scalars().all()
+
+        count = 0
+        now = datetime.now(timezone.utc)
+        for rec in recomendaciones:
+            rec.resuelto = True
+            rec.resolucion = "auto"
+            rec.resuelto_en = now
+            count += 1
+
+        if count > 0:
+            await db.commit()
+
+        return count
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def obtener_recomendaciones_usuario(
+    db: AsyncSession,
+    user_id: int,
+    solo_activas: bool = True,
+) -> list[Recomendacion]:
+    stmt = (
+        select(Recomendacion)
+        .join(Artefacto, Recomendacion.id_artefacto == Artefacto.id)
+        .join(PermisoUsuarioArtefacto, Artefacto.id == PermisoUsuarioArtefacto.id_artefacto)
+        .where(
+            PermisoUsuarioArtefacto.id_usuario == user_id,
+            Artefacto.deleted_at.is_(None),
+        )
+    )
+    if solo_activas:
+        stmt = stmt.where(Recomendacion.resuelto == False)
+
+    stmt = stmt.order_by(Recomendacion.timestamp.desc())
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def marcar_recomendacion_resuelta(
+    db: AsyncSession, recomendacion_id: int, user_id: int
+) -> Recomendacion | None:
+    try:
+        stmt = (
+            select(Recomendacion)
+            .join(Artefacto, Recomendacion.id_artefacto == Artefacto.id)
+            .join(PermisoUsuarioArtefacto, Artefacto.id == PermisoUsuarioArtefacto.id_artefacto)
+            .where(
+                Recomendacion.id == recomendacion_id,
+                PermisoUsuarioArtefacto.id_usuario == user_id,
+                Artefacto.deleted_at.is_(None),
+            )
+        )
+        result = await db.execute(stmt)
+        rec = result.scalar_one_or_none()
+
+        if not rec:
+            return None
+
+        rec.resuelto = True
+        rec.resolucion = "manual"
+        rec.resuelto_en = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(rec)
+        return rec
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def obtener_recomendaciones_resueltas_recientes(
+    db: AsyncSession,
+    id_artefacto: int,
+    tipo_recomendacion: str,
+    horas: int = 24,
+) -> list[Recomendacion]:
+    desde = datetime.now(timezone.utc) - timedelta(hours=horas)
+    stmt = (
+        select(Recomendacion)
+        .where(
+            Recomendacion.id_artefacto == id_artefacto,
+            Recomendacion.tipo_recomendacion == tipo_recomendacion,
+            Recomendacion.resuelto == True,
+            Recomendacion.resuelto_en >= desde,
+        )
+        .order_by(Recomendacion.resuelto_en.desc())
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# USER SETTINGS
+# ---------------------------------------------------------------------------
+
+async def actualizar_settings_usuario(db: AsyncSession, user_id: int, datos: dict) -> Usuario | None:
+    try:
+        stmt = select(Usuario).where(Usuario.id == user_id)
+        result = await db.execute(stmt)
+        usuario = result.scalar_one_or_none()
+
+        if not usuario:
+            return None
+
+        for k, v in datos.items():
+            if v is not None and hasattr(usuario, k):
+                setattr(usuario, k, v)
+
+        await db.commit()
+        await db.refresh(usuario)
+        return usuario
     except Exception:
         await db.rollback()
         raise
@@ -586,6 +759,25 @@ async def romper_lease_por_seguridad(db: AsyncSession, mac: str) -> Artefacto | 
 
         dispositivo.override_activo = False
         dispositivo.vencimiento_lease = None
+        await db.commit()
+        await db.refresh(dispositivo)
+        return dispositivo
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def cancelar_auto_kill(db: AsyncSession, mac: str, cooldown_minutes: int = 30) -> Artefacto | None:
+    try:
+        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+        result = await db.execute(stmt)
+        dispositivo = result.scalar_one_or_none()
+
+        if not dispositivo:
+            return None
+
+        dispositivo.auto_kill_at = None
+        dispositivo.ai_override_until = datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
         await db.commit()
         await db.refresh(dispositivo)
         return dispositivo

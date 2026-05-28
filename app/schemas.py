@@ -83,6 +83,7 @@ class DispositivoResponse(BaseModel):
     is_online: bool
     nivel_acceso: str = "ADMIN"
     last_seen_at: Optional[datetime] = None
+    auto_kill_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -126,6 +127,57 @@ class AlertaResponse(BaseModel):
 
 class AlertaUpdate(BaseModel):
     resuelto: bool
+
+
+# --- RECOMMENDATION SCHEMAS ---
+TIPOS_RECOMENDACION = {
+    "consumo_riesgo_sostenido",
+    "oscilacion_frecuente",
+    "recuperacion_consumo",
+    "fluctuacion_voltaje",
+}
+
+ACCIONES_SUGERIDAS = {
+    "turn_off",
+    "investigate",
+}
+
+
+class RecomendacionResponse(BaseModel):
+    id: int
+    id_artefacto: int
+    tipo_recomendacion: str
+    mensaje: str
+    accion_sugerida: Optional[str] = None
+    severidad: str
+    resuelto: bool
+    resolucion: Optional[str] = None
+    timestamp: datetime
+    resuelto_en: Optional[datetime] = None
+    mac_dispositivo: Optional[str] = None
+    nombre_personalizado: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {datetime: _serialize_datetime}
+
+
+class RecomendacionUpdate(BaseModel):
+    resuelto: bool
+
+
+# --- USER SETTINGS SCHEMAS ---
+class UserSettingsUpdate(BaseModel):
+    ai_control_habilitado: Optional[bool] = None
+    auto_apagado_low_priority: Optional[bool] = None
+
+
+class UserSettingsResponse(BaseModel):
+    ai_control_habilitado: bool
+    auto_apagado_low_priority: bool
+
+    class Config:
+        from_attributes = True
 
 
 # --- EVENT SCHEMAS ---

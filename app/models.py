@@ -21,6 +21,9 @@ class Usuario(Base):
     ultimo_acceso = Column(DateTime(timezone=True), nullable=True)
     activo = Column(Boolean, default=True, nullable=False)
 
+    ai_control_habilitado = Column(Boolean, default=False, nullable=False)
+    auto_apagado_low_priority = Column(Boolean, default=False, nullable=False)
+
     permisos = relationship("PermisoUsuarioArtefacto", back_populates="usuario", cascade="all, delete-orphan")
 
 
@@ -47,12 +50,17 @@ class Artefacto(Base):
     # Soft delete
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # AI Control scheduling state (per-device)
+    auto_kill_at = Column(DateTime(timezone=True), nullable=True)
+    ai_override_until = Column(DateTime(timezone=True), nullable=True)
+
     # Cascading Relationships
     limites = relationship("ArtefactoLimite", uselist=False, cascade="all, delete-orphan")
     permisos_usuario = relationship("PermisoUsuarioArtefacto", back_populates="artefacto", cascade="all, delete-orphan")
     alertas = relationship("AlertaSistema", back_populates="artefacto", cascade="all, delete-orphan")
     credenciales = relationship("CredencialMtls", back_populates="artefacto", cascade="all, delete-orphan")
     despliegues = relationship("DespliegueOta", back_populates="artefacto", cascade="all, delete-orphan")
+    recomendaciones = relationship("Recomendacion", back_populates="artefacto", cascade="all, delete-orphan")
     eventos = relationship("EventoUsuario", back_populates="artefacto", cascade="all, delete-orphan")
 
 
@@ -127,6 +135,23 @@ class DespliegueOta(Base):
     fecha_despliegue = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
     artefacto = relationship("Artefacto", back_populates="despliegues")
+
+
+class Recomendacion(Base):
+    __tablename__ = 'recomendaciones'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id_artefacto = Column(Integer, ForeignKey('artefactos.id', ondelete="CASCADE"), nullable=False, index=True)
+    tipo_recomendacion = Column(String(50), nullable=False)
+    mensaje = Column(String(500), nullable=False)
+    accion_sugerida = Column(String(50), nullable=True)
+    severidad = Column(String(20), nullable=False, default="warning")
+    resuelto = Column(Boolean, default=False, nullable=False, index=True)
+    resolucion = Column(String(20), nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    resuelto_en = Column(DateTime(timezone=True), nullable=True)
+
+    artefacto = relationship("Artefacto", back_populates="recomendaciones")
 
 
 class EventoUsuario(Base):

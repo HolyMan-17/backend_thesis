@@ -3,10 +3,12 @@
 > **Single source of truth** for frontend-backend integration.
 > Contains: API contract, Auth0 flow, schema definitions, WebSocket protocol, test checklist, troubleshooting.
 >
-> **Last updated:** 2026-05-21
-> **Backend version:** V5.0
+> **Last updated:** 2026-05-28
+> **Backend version:** V8.0
 >
 > **⚠️ BREAKING CHANGE V5.0:** `is_encendido` removed from `DispositivoResponse`. Use `estado_reportado` for relay state and `estado_deseado` for pending commands. `limite_*` fields still present but now stored in normalized table.
+> **V7.0:** Added AI-based recommendations (`/api/recomendaciones`).
+> **V8.0:** Added AI Control (auto-kill) with user-level global settings (`/api/users/settings`).
 
 ---
 
@@ -18,11 +20,13 @@
 4. [Request / Response Schemas](#4-request--response-schemas)
 5. [Error Contract](#5-error-contract)
 6. [WebSocket Real-Time Streaming](#6-websocket-real-time-streaming)
-7. [Integration Test Sequence](#7-integration-test-sequence)
-8. [Frontend State Machine](#8-frontend-state-machine)
-9. [Common Failures & Fixes](#9-common-failures--fixes)
-10. [Quick Verification Checklist](#10-quick-verification-checklist)
-11. [Known Issues](#11-known-issues)
+7. [AI-Based Recommendations (V7)](#7-ai-based-recommendations)
+8. [AI Control & Auto-Kill (V8)](#8-ai-control--auto-kill)
+9. [Integration Test Sequence](#9-integration-test-sequence)
+10. [Frontend State Machine](#10-frontend-state-machine)
+11. [Common Failures & Fixes](#11-common-failures--fixes)
+12. [Quick Verification Checklist](#12-quick-verification-checklist)
+13. [Known Issues](#13-known-issues)
 
 ---
 
@@ -211,6 +215,11 @@ Frontend should NOT retry — force logout and prompt re-login.
 | `POST` | `/api/dispositivos/{mac}/comando/limites` | Update safety limits |
 | `GET` | `/api/alertas?solo_activas=true|false` | List alerts |
 | `PATCH` | `/api/alertas/{alerta_id}` | Resolve alert |
+| `GET` | `/api/recomendaciones?solo_activas=true|false` | List AI recommendations (V7) |
+| `PATCH` | `/api/recomendaciones/{id}` | Dismiss recommendation (V7) |
+| `GET` | `/api/users/settings` | Get global AI control settings (V8) |
+| `PATCH` | `/api/users/settings` | Update global AI control settings (V8) |
+| `POST` | `/api/dispositivos/{mac}/ai-control/override` | Cancel auto-kill + cooldown (V8) |
 | `GET` | `/api/eventos?mac=...&limite=50` | List events |
 | `WS` | `/ws/telemetry?token=<jwt>` | Real-time telemetry stream |
 
@@ -242,7 +251,7 @@ Frontend should NOT retry — force logout and prompt re-login.
   "id": 1,
   "mac": "00:1B:44:11:3A:B7",
   "nombre_personalizado": "Kitchen Light",
-  "nivel_prioridad": "alta",
+  "nivel_prioridad": "P2",
   "limite_consumo_w": 150.00,
   "limite_voltaje": 14.00,
   "limite_corriente": 2.00,
@@ -251,7 +260,8 @@ Frontend should NOT retry — force logout and prompt re-login.
   "estado_reportado": false,
   "is_online": true,
   "nivel_acceso": "ADMIN",
-  "last_seen_at": "2026-05-12T14:30:00Z"
+  "last_seen_at": "2026-05-12T14:30:00Z",
+  "auto_kill_at": null
 }
 ```
 
@@ -408,7 +418,78 @@ Frontend should NOT retry — force logout and prompt re-login.
 ]
 ```
 
-**Frontend note:** Show in activity log / audit trail. `safety_override` events indicate the AI lease was broken by a safety alert.
+**Frontend note:** Show in activity log / audit trail. `safety_override` events indicate the AI lease was broken by a safety alert. `auto_kill` events indicate the AI turned off the device. `ai_override` events indicate the user cancelled an auto-kill.
+
+### Recommendations (`GET /api/recomendaciones?solo_activas=true`) (V7)
+
+**Response:**
+
+```json
+[
+  {
+    "id": 1,
+    "id_artefacto": 3,
+    "tipo_recomendacion": "consumo_riesgo_sostenido",
+    "mensaje": "Kitchen Light shows sustained risky consumption (avg AI status: 1.2) for 5+ min. Consider turning it off to preserve battery life.",
+    "accion_sugerida": "turn_off",
+    "severidad": "warning",
+    "resuelto": false,
+    "resolucion": null,
+    "timestamp": "2026-05-28T14:32:00Z",
+    "resuelto_en": null,
+    "mac_dispositivo": "AA:BB:CC:DD:EE:FF",
+    "nombre_personalizado": "Kitchen Light"
+  }
+]
+```
+
+| Field | Description |
+|-------|-------------|
+| `tipo_recomendacion` | `consumo_riesgo_sostenido`, `oscilacion_frecuente`, `recuperacion_consumo`, `fluctuacion_voltaje` |
+| `accion_sugerida` | `turn_off` → show button; `investigate` → show label; `null` → informational only |
+| `severidad` | `warning` (amber), `info` (blue), `critical` (red) |
+
+**Dismiss (`PATCH /api/recomendaciones/{id}`):**
+```json
+{ "resuelto": true }
+```
+
+**Auto-resolve:** Recommendations can disappear from the active list without user action (when the condition clears). Handle 404 gracefully.
+
+### User Settings (`GET /api/users/settings`, `PATCH /api/users/settings`) (V8)
+
+**Response (GET):**
+```json
+{
+  "ai_control_habilitado": false,
+  "auto_apagado_low_priority": false
+}
+```
+
+**Request (PATCH — partial, send only changed fields):**
+```json
+{ "ai_control_habilitado": true }
+```
+
+| Setting | Scope | Default | Behavior |
+|---------|-------|---------|----------|
+| `ai_control_habilitado` | Global (all user's devices) | `false` | AI can auto-kill devices after a 5-min warning grace period |
+| `auto_apagado_low_priority` | Global (P3 devices only) | `false` | P3 devices are immediately turned off when RISKY — no grace period |
+
+**Note:** These are user-level settings, NOT per-device. The frontend should show them in the app's global Settings screen.
+
+### Auto-Kill Override (`POST /api/dispositivos/{mac}/ai-control/override`) (V8)
+
+**Response:**
+```json
+{
+  "status": "overridden",
+  "mac": "AA:BB:CC:DD:EE:FF",
+  "ai_override_until": "2026-05-28T15:07:00Z"
+}
+```
+
+Cancels a pending auto-kill for this device and pauses the AI for 30 minutes (cooldown period).
 
 ### Delete Device (`DELETE /api/dispositivos/{mac}`)
 
@@ -508,11 +589,168 @@ ws.onmessage = (event) => {
 }
 ```
 
-**Frontend note:** No need to send messages to the server — server pushes only.
+**Auto-kill warning (V8):**
+```json
+{
+  "type": "auto_kill_warning",
+  "mac": "00:1B:44:11:3A:B7",
+  "data": {
+    "auto_kill_at": "2026-05-28T14:37:00Z",
+    "grace_period_min": 5,
+    "message": "⚠️ High drain detected on Kitchen Light. It will be automatically turned off in 5 minutes.",
+    "accion_sugerida": "keep_on"
+  }
+}
+```
+
+**Auto-kill executed (V8):**
+```json
+{
+  "type": "auto_kill_executed",
+  "mac": "00:1B:44:11:3A:B7",
+  "data": {
+    "message": "Kitchen Light was automatically turned off to preserve battery."
+  }
+}
+```
+
+**Auto-kill cancelled (V8):**
+```json
+{
+  "type": "auto_kill_cancelled",
+  "mac": "00:1B:44:11:3A:B7",
+  "data": {
+    "message": "Risk condition cleared for Kitchen Light."
+  }
+}
+```
+
+**Frontend note:** No need to send messages to the server — server pushes only. Handle `auto_kill_*` events by showing notifications, countdown timers, and action buttons.
 
 ---
 
-## 7. Integration Test Sequence
+---
+
+## 7. AI-Based Recommendations (V7)
+
+The recommendation engine scans all online devices every 60 seconds and creates contextual recommendations based on AI status patterns.
+
+### Recommendation Types
+
+| Type | Trigger | Action | Auto-resolves when... |
+|------|---------|--------|----------------------|
+| `consumo_riesgo_sostenido` | avg `ai_status` ≥ 1 for 5+ min | `turn_off` | avg `ai_status` < 1 over 5 min |
+| `oscilacion_frecuente` | 5+ `ai_status` transitions in 30 min | `investigate` | < 2 transitions in 30 min |
+| `recuperacion_consumo` | Sustained SAFE after resolved RISKY | `null` (info) | **Never** — user must dismiss |
+| `fluctuacion_voltaje` | Avg voltage < 105V for 5+ min OR 3+ sag events in 30 min | `turn_off` | Avg voltage > 105V for 5+ min |
+
+### Frontend UI
+
+- **List:** `GET /api/recomendaciones?solo_activas=true` — show active recommendations in a card/list format
+- **Dismiss:** `PATCH /api/recomendaciones/{id} {"resuelto": true}` — user dismisses manually
+- **Action buttons:**
+  - `turn_off` → "Turn Off Device" button (calls `POST /api/dispositivos/{mac}/comando/estado {"encendido": false}`)
+  - `investigate` → "Investigate" label linking to device detail
+  - `null` → no action button (informational only)
+- **Badge:** Poll every 30s to show unread count
+- **Severity:** `warning` (amber), `info` (blue), `critical` (red)
+
+---
+
+## 8. AI Control & Auto-Kill (V8)
+
+Two **global user-level settings** control autonomous device management.
+
+### Settings Location
+
+Both toggles live in the app's **global Settings screen** (NOT per-device):
+
+```typescript
+// Fetch current settings
+const response = await fetch('/api/users/settings', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+const { ai_control_habilitado, auto_apagado_low_priority } = await response.json();
+
+// Enable Master AI Control
+await fetch('/api/users/settings', {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+  body: JSON.stringify({ ai_control_habilitado: true }),
+});
+```
+
+### Master AI Control (`ai_control_habilitado`)
+
+When enabled, the AI monitors all user's devices for sustained RISKY consumption:
+
+```
+Detection: ai_status ≥ 1 for 2+ minutes
+    ↓
+Warning: Backend sets auto_kill_at = NOW() + 5 minutes
+    ↓
+WebSocket push: auto_kill_warning event
+    ↓
+Frontend shows: Push notification + countdown timer + "Keep it On" button
+    ↓
+User has 5 minutes to override
+    ├── User taps "Keep it On" → POST /api/dispositivos/{mac}/ai-control/override
+    │   → Cancels auto-kill, sets 30-min cooldown
+    │   → Next auto-kill won't fire until cooldown expires
+    └── No action → Backend publishes {"encendido": false} via MQTT
+        → Device turns off
+        → WebSocket push: auto_kill_executed
+```
+
+### P3 Auto-Kill (`auto_apagado_low_priority`)
+
+When enabled, any P3 device is **immediately** turned off when RISKY is detected — no grace period.
+
+```
+Detection: ai_status ≥ 1 for 2+ minutes on a P3 device
+    ↓
+Immediate: Backend publishes {"encendido": false} via MQTT
+    ↓
+WebSocket push: auto_kill_executed (no warning event)
+```
+
+**Priority:** P3 auto-kill takes precedence over Master AI Control. If both are enabled and a P3 device goes RISKY, it is killed immediately.
+
+### Device Detail — Countdown Timer
+
+When a device has `auto_kill_at` set (from the device detail response), show a countdown:
+
+```typescript
+if (device.auto_kill_at) {
+  const timeRemaining = new Date(device.auto_kill_at) - new Date();
+  // Show: "Auto-turn off in 4:32" + "Keep it On" button
+}
+```
+
+### Priority-Based Auto-Kill Matrix
+
+| Priority | `ai_control_habilitado` | `auto_apagado_low_priority` | Behavior when RISKY for 2min |
+|----------|------------------------|----------------------------|------------------------------|
+| P1 | false | false | Passive recommendation only |
+| P1 | true | false | 5-min grace period, then auto-kill |
+| P2 | false | false | Passive recommendation only |
+| P2 | true | false | 5-min grace period, then auto-kill |
+| P3 | false | false | Passive recommendation only |
+| P3 | false | true | **Immediate auto-kill** (no grace) |
+| P3 | true | false | 5-min grace period, then auto-kill |
+| P3 | true | true | **Immediate auto-kill** (P3 rule takes precedence) |
+
+### WebSocket Events Summary
+
+| Event | When | Frontend Action |
+|-------|------|-----------------|
+| `auto_kill_warning` | Grace period starts | Show notification with "Keep it On" button, start countdown |
+| `auto_kill_executed` | Device was auto-killed | Show notification, update device state to OFF |
+| `auto_kill_cancelled` | Risk cleared before kill | Dismiss countdown, show "Risk cleared" notification |
+
+---
+
+## 9. Integration Test Sequence
 
 Run these in order. Each step depends on the previous one succeeding.
 
@@ -582,6 +820,33 @@ Run these in order. Each step depends on the previous one succeeding.
 - [ ] Backend validates token, accepts connection
 - [ ] When device publishes telemetry, frontend receives real-time JSON message
 - [ ] When device goes offline, frontend receives `conexion` event
+
+### Test 13: Recommendations (V7)
+- [ ] Send RISKY telemetry (`ai_status: 1`) for 5+ minutes
+- [ ] `GET /api/recomendaciones` returns a `consumo_riesgo_sostenido` recommendation
+- [ ] Recommendation has `accion_sugerida: "turn_off"`
+- [ ] `PATCH /api/recomendaciones/{id} {"resuelto": true}` dismisses it
+- [ ] Send SAFE telemetry → recommendation auto-resolves on next scan
+
+### Test 14: AI Control — Grace Period (V8)
+- [ ] `PATCH /api/users/settings {"ai_control_habilitado": true}`
+- [ ] Send RISKY telemetry for 2+ minutes
+- [ ] Frontend receives `auto_kill_warning` WebSocket event
+- [ ] Device response shows `auto_kill_at` timestamp
+- [ ] Call `POST /api/dispositivos/{mac}/ai-control/override` → `auto_kill_at` is cleared
+- [ ] Wait 5 minutes without override → device turns off, `auto_kill_executed` event received
+
+### Test 15: AI Control — P3 Immediate Kill (V8)
+- [ ] `PATCH /api/users/settings {"auto_apagado_low_priority": true}`
+- [ ] Set device priority to P3
+- [ ] Send RISKY telemetry for 2+ minutes
+- [ ] Device turns off immediately (no `auto_kill_warning` event)
+- [ ] Frontend receives `auto_kill_executed` event
+
+### Test 16: User Settings (V8)
+- [ ] `GET /api/users/settings` returns `{ai_control_habilitado, auto_apagado_low_priority}`
+- [ ] `PATCH /api/users/settings` updates toggles
+- [ ] Changes apply to all user's devices
 
 ---
 
@@ -666,7 +931,13 @@ App Launch
 - [ ] `PATCH /api/alertas/{alerta_id}` resolves alert
 - [ ] `GET /api/eventos` returns user/device events (including `safety_override`)
 - [ ] `DELETE /api/dispositivos/{mac}` soft deletes device
+- [ ] `GET /api/recomendaciones` returns recommendations when conditions met (V7)
+- [ ] `PATCH /api/recomendaciones/{id}` dismisses recommendation (V7)
+- [ ] `GET /api/users/settings` returns global AI control toggles (V8)
+- [ ] `PATCH /api/users/settings` updates global toggles (V8)
+- [ ] `POST /api/dispositivos/{mac}/ai-control/override` cancels auto-kill (V8)
 - [ ] WebSocket streams telemetry in real-time
+- [ ] WebSocket pushes `auto_kill_warning`, `auto_kill_executed`, `auto_kill_cancelled` events (V8)
 - [ ] All errors return `{error, message, ...}` format (never `{detail}`)
 - [ ] Datetime fields include `Z` suffix (UTC timezone)
 

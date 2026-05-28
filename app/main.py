@@ -1,11 +1,13 @@
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
 import paho.mqtt.publish as publish
 from fastapi import FastAPI, Depends, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -15,8 +17,9 @@ from app.schemas import (
     DispositivoCreate, DispositivoUpdate, DispositivoResponse,
     ComandoEstado, ComandoLimites,
     DispositivoEstado, DispositivoLimites, DispositivoEstadoResponse,
-    UserSyncRequest,
+    UserSyncRequest, UserSettingsUpdate, UserSettingsResponse,
     AlertaResponse, AlertaUpdate,
+    RecomendacionResponse, RecomendacionUpdate,
     EventoResponse,
     AgregadoResponse, AgregadoQuery,
 )
@@ -30,16 +33,19 @@ from app.crud import (
     crear_dispositivo, eliminar_dispositivo,
     obtener_agregados_telemetria,
     obtener_alertas_usuario, marcar_alerta_resuelta,
+    obtener_recomendaciones_usuario, marcar_recomendacion_resuelta,
+    cancelar_auto_kill, actualizar_settings_usuario,
     crear_evento, obtener_eventos_usuario,
 )
 from app.mqtt_listener import iniciar_oyente_mqtt
+from app.recommendation_engine import run_recommendation_engine
 from app.ws_manager import ws_manager
 from app.auth import get_current_user, verify_sync_secret
 from app.exceptions import (
     AppException, NotFoundException, ForbiddenException,
     app_exception_handler, validation_exception_handler,
 )
-from app.models import Usuario
+from app.models import Usuario, Artefacto, Recomendacion
 from fastapi.exceptions import RequestValidationError
 
 logger = logging.getLogger("uvicorn.error")
@@ -48,7 +54,9 @@ logger = logging.getLogger("uvicorn.error")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cliente_mqtt = iniciar_oyente_mqtt()
+    engine_task = asyncio.create_task(run_recommendation_engine())
     yield
+    engine_task.cancel()
     cliente_mqtt.loop_stop()
     cliente_mqtt.disconnect()
 
@@ -91,6 +99,7 @@ def artefacto_to_response(artefacto, nivel_acceso: str = "ADMIN") -> Dispositivo
         is_online=artefacto.is_online,
         nivel_acceso=nivel_acceso,
         last_seen_at=artefacto.last_seen_at,
+        auto_kill_at=artefacto.auto_kill_at,
     )
 
 
@@ -112,6 +121,39 @@ async def sync_user(
     verify_sync_secret(request)
     usuario = await sincronizar_usuario(db, sync_in)
     return {"status": "synced", "auth0_id": usuario.auth0_id}
+
+
+# --- USER SETTINGS ---
+
+@app.get("/api/users/settings", response_model=UserSettingsResponse)
+async def get_user_settings(
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    return UserSettingsResponse(
+        ai_control_habilitado=user.ai_control_habilitado,
+        auto_apagado_low_priority=user.auto_apagado_low_priority,
+    )
+
+
+@app.patch("/api/users/settings", response_model=UserSettingsResponse)
+async def update_user_settings(
+    settings_in: UserSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    datos = settings_in.model_dump(exclude_unset=True)
+    if not datos:
+        raise AppException(error="validation_error", message="No fields to update", status_code=422)
+
+    usuario = await actualizar_settings_usuario(db, user.id, datos)
+    if not usuario:
+        raise NotFoundException(message="Usuario no encontrado")
+
+    return UserSettingsResponse(
+        ai_control_habilitado=usuario.ai_control_habilitado,
+        auto_apagado_low_priority=usuario.auto_apagado_low_priority,
+    )
 
 
 # --- M2M ENDPOINTS (no JWT) ---
@@ -305,6 +347,30 @@ async def comando_limites(
     return {}
 
 
+# --- AI CONTROL ---
+
+@app.post("/api/dispositivos/{mac}/ai-control/override")
+async def ai_control_override(
+    mac: str,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not await verificar_acceso(db, user.id, mac):
+        raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    dispositivo = await cancelar_auto_kill(db, mac, cooldown_minutes=settings.AI_CONTROL_OVERRIDE_COOLDOWN_MIN)
+    if not dispositivo:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    await crear_evento(
+        db, id_artefacto=dispositivo.id, id_usuario=user.id,
+        accion="ai_override",
+        razon_disparo=f"Usuario canceló auto-kill para {mac}",
+    )
+
+    return {"status": "overridden", "mac": mac, "ai_override_until": dispositivo.ai_override_until.isoformat() if dispositivo.ai_override_until else None}
+
+
 # --- ALERTS ---
 
 @app.get("/api/alertas", response_model=List[AlertaResponse])
@@ -332,6 +398,54 @@ async def resolver_alerta(
         raise NotFoundException(message="Alerta no encontrada", alerta_id=alerta_id)
 
     return alerta
+
+
+# --- RECOMMENDATIONS ---
+
+@app.get("/api/recomendaciones", response_model=List[RecomendacionResponse])
+async def listar_recomendaciones(
+    solo_activas: bool = True,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    recomendaciones = await obtener_recomendaciones_usuario(db, user.id, solo_activas=solo_activas)
+    results = []
+    for rec in recomendaciones:
+        artefacto = await db.execute(
+            select(Artefacto).where(Artefacto.id == rec.id_artefacto)
+        )
+        device = artefacto.scalar_one_or_none()
+        rec_dict = RecomendacionResponse.model_validate(rec)
+        if device:
+            rec_dict.mac_dispositivo = device.mac
+            rec_dict.nombre_personalizado = device.nombre_personalizado
+        results.append(rec_dict)
+    return results
+
+
+@app.patch("/api/recomendaciones/{recomendacion_id}", response_model=RecomendacionResponse)
+async def resolver_recomendacion(
+    recomendacion_id: int,
+    rec_in: RecomendacionUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not rec_in.resuelto:
+        raise AppException(error="validation_error", message="Only resolving recommendations is supported", status_code=422)
+
+    rec = await marcar_recomendacion_resuelta(db, recomendacion_id, user.id)
+    if not rec:
+        raise NotFoundException(message="Recomendacion no encontrada", recomendacion_id=recomendacion_id)
+
+    result = RecomendacionResponse.model_validate(rec)
+    artefacto = await db.execute(
+        select(Artefacto).where(Artefacto.id == rec.id_artefacto)
+    )
+    device = artefacto.scalar_one_or_none()
+    if device:
+        result.mac_dispositivo = device.mac
+        result.nombre_personalizado = device.nombre_personalizado
+    return result
 
 
 # --- EVENTS ---
@@ -457,7 +571,6 @@ async def websocket_telemetry(
         return
 
     from app.models import Usuario as UsuarioModel
-    from sqlalchemy import select
 
     stmt = select(UsuarioModel).where(UsuarioModel.auth0_id == auth0_id, UsuarioModel.activo == True)
     result = await db.execute(stmt)
