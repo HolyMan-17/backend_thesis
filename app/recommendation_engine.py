@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import traceback
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select
@@ -340,7 +341,7 @@ async def _evaluate_device(db: AsyncSession, artefacto: Artefacto) -> None:
         elif owner.ai_control_habilitado:
             await _handle_ai_control(db, artefacto, rows, owner)
     except Exception as e:
-        logger.error(f"Error evaluating recommendations for {artefacto.mac}: {e}")
+        logger.error(f"Error evaluating recommendations for device: {e}\n{traceback.format_exc()}")
 
 
 async def scan_all_devices() -> None:
@@ -374,7 +375,7 @@ async def scan_all_devices() -> None:
                 if device:
                     await _evaluate_device(db, device)
         except Exception as e:
-            logger.error(f"Failed to evaluate device {mac} in dedicated session: {e}")
+            logger.error(f"Failed to evaluate device {mac} in dedicated session: {e}\n{traceback.format_exc()}")
 
 
 async def run_recommendation_engine() -> None:
