@@ -161,6 +161,8 @@ async def actualizar_estado_reportado(db: AsyncSession, mac: str, encendido: boo
             return False
 
         dispositivo.estado_reportado = encendido
+        if not encendido:
+            dispositivo.auto_kill_at = None
         await db.commit()
         return True
     except Exception:
@@ -958,6 +960,8 @@ async def comando_estado_con_lease(
             return None
 
         dispositivo.estado_deseado = encendido
+        if not encendido:
+            dispositivo.auto_kill_at = None
         dispositivo.override_activo = True
         dispositivo.vencimiento_lease = datetime.now(timezone.utc) + timedelta(minutes=duracion_minutos)
         await db.flush()

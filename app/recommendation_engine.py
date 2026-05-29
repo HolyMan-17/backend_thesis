@@ -227,6 +227,17 @@ async def _get_owner_settings(db: AsyncSession, id_artefacto: int) -> Usuario | 
 async def _handle_ai_control(
     db: AsyncSession, artefacto: Artefacto, rows: list, owner: Usuario
 ) -> None:
+    # If device is already turned off physically or commanded off, do not schedule or execute auto-kill.
+    # Cancel any active warning timer if it exists.
+    if not artefacto.estado_reportado or not artefacto.estado_deseado:
+        if artefacto.auto_kill_at:
+            artefacto.auto_kill_at = None
+            await db.commit()
+            await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
+                "message": f"Device is off, cancelling auto-kill warning.",
+            })
+        return
+
     # Normalize current time and DB datetimes to timezone-naive UTC to prevent offset mismatch errors
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     
