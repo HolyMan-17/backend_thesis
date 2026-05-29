@@ -318,10 +318,26 @@ async def comando_estado(
         raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
 
     if dispositivo.horario and dispositivo.horario.automatizacion_activa:
-        if not comando.override_automation:
-            raise AppException(error="automation_active", message="La automatización está activa. Se requiere override_automation=true para proceder.", status_code=409)
-        # Disable automation
-        await actualizar_horario_dispositivo(db, mac, {"automatizacion_activa": False})
+        import zoneinfo
+        from datetime import datetime
+        tz = zoneinfo.ZoneInfo("America/Caracas")
+        now_local = datetime.now(tz)
+        current_day = now_local.isoweekday()
+        current_minutes = now_local.hour * 60 + now_local.minute
+        
+        in_schedule = False
+        if dispositivo.horario.dias_operacion and current_day in dispositivo.horario.dias_operacion:
+            if dispositivo.horario.hora_encendido and dispositivo.horario.hora_apagado:
+                start_min = dispositivo.horario.hora_encendido.hour * 60 + dispositivo.horario.hora_encendido.minute
+                end_min = dispositivo.horario.hora_apagado.hour * 60 + dispositivo.horario.hora_apagado.minute
+                if start_min <= current_minutes < end_min:
+                    in_schedule = True
+                    
+        if in_schedule:
+            if not comando.override_automation:
+                raise AppException(error="automation_active", message="El dispositivo está operando dentro del horario establecido. Se requiere override_automation=true para proceder.", status_code=409)
+            # Disable automation
+            await actualizar_horario_dispositivo(db, mac, {"automatizacion_activa": False})
 
     dispositivo = await comando_estado_con_lease(
         db, mac, comando.encendido, duracion_minutos=5, id_usuario=user.id,
