@@ -209,7 +209,7 @@ async def crear_recomendacion_si_necesario(
             Recomendacion.resuelto == False,
         )
         result = await db.execute(stmt)
-        existente = result.scalar_one_or_none()
+        existente = result.scalars().first()
 
         if existente:
             return None
@@ -810,7 +810,7 @@ async def crear_alerta_si_necesario(
             AlertaSistema.resuelto == False,
         )
         result = await db.execute(stmt)
-        alerta_existente = result.scalar_one_or_none()
+        alerta_existente = result.scalars().first()
 
         if alerta_existente:
             return None
