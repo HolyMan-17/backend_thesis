@@ -105,6 +105,7 @@ def artefacto_to_response(artefacto, nivel_acceso: str = "ADMIN") -> Dispositivo
         nivel_acceso=nivel_acceso,
         last_seen_at=artefacto.last_seen_at,
         auto_kill_at=artefacto.auto_kill_at,
+        automatizacion_activa=artefacto.horario.automatizacion_activa if artefacto.horario else False,
     )
 
 
@@ -311,6 +312,16 @@ async def comando_estado(
 ):
     if not await verificar_acceso(db, user.id, mac):
         raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    dispositivo = await obtener_dispositivo_por_mac(db, mac)
+    if not dispositivo:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    if dispositivo.horario and dispositivo.horario.automatizacion_activa:
+        if not comando.override_automation:
+            raise AppException(error="automation_active", message="La automatización está activa. Se requiere override_automation=true para proceder.", status_code=409)
+        # Disable automation
+        await actualizar_horario_dispositivo(db, mac, {"automatizacion_activa": False})
 
     dispositivo = await comando_estado_con_lease(
         db, mac, comando.encendido, duracion_minutos=5, id_usuario=user.id,

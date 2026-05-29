@@ -84,6 +84,7 @@ class DispositivoResponse(BaseModel):
     nivel_acceso: str = "ADMIN"
     last_seen_at: Optional[datetime] = None
     auto_kill_at: Optional[datetime] = None
+    automatizacion_activa: bool = False
 
     class Config:
         from_attributes = True
@@ -115,6 +116,7 @@ class HorarioResponse(HorarioBase):
 # --- COMMAND SCHEMAS ---
 class ComandoEstado(BaseModel):
     encendido: bool
+    override_automation: bool = False
 
 
 class ComandoLimites(BaseModel):

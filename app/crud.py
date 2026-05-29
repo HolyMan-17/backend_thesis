@@ -437,7 +437,10 @@ async def obtener_dispositivos_usuario(db: AsyncSession, user_id: int, prioridad
             PermisoUsuarioArtefacto.id_usuario == user_id,
             Artefacto.deleted_at.is_(None),
         )
-        .options(selectinload(Artefacto.limites))
+        .options(
+            selectinload(Artefacto.limites),
+            selectinload(Artefacto.horario)
+        )
     )
     if prioridad is not None:
         stmt = stmt.where(Artefacto.nivel_prioridad == prioridad)
@@ -454,7 +457,10 @@ async def obtener_dispositivo_con_acceso(db: AsyncSession, mac: str, user_id: in
             PermisoUsuarioArtefacto.id_usuario == user_id,
             Artefacto.deleted_at.is_(None),
         )
-        .options(selectinload(Artefacto.limites))
+        .options(
+            selectinload(Artefacto.limites),
+            selectinload(Artefacto.horario)
+        )
     )
     result = await db.execute(stmt)
     return result.first()
@@ -478,7 +484,10 @@ async def obtener_dispositivo_por_mac(db: AsyncSession, mac: str) -> Artefacto |
     stmt = (
         select(Artefacto)
         .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
-        .options(selectinload(Artefacto.limites))
+        .options(
+            selectinload(Artefacto.limites),
+            selectinload(Artefacto.horario)
+        )
     )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
@@ -541,7 +550,10 @@ async def actualizar_dispositivo(db: AsyncSession, mac: str, datos: dict) -> Art
         stmt = (
             select(Artefacto)
             .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
-            .options(selectinload(Artefacto.limites))
+            .options(
+            selectinload(Artefacto.limites),
+            selectinload(Artefacto.horario)
+        )
         )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
