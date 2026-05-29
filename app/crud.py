@@ -223,7 +223,7 @@ async def crear_recomendacion_si_necesario(
         )
         db.add(recomendacion)
         await db.commit()
-        await db.refresh(recomendacion)
+        await db.refresh(recomendacion, attribute_names=["id", "timestamp"])
         return recomendacion
     except Exception:
         await db.rollback()
@@ -823,7 +823,7 @@ async def crear_alerta_si_necesario(
         )
         db.add(alerta)
         await db.commit()
-        await db.refresh(alerta)
+        await db.refresh(alerta, attribute_names=["id", "timestamp"])
         return alerta
     except Exception:
         await db.rollback()
@@ -930,7 +930,7 @@ async def crear_evento(
         )
         db.add(evento)
         await db.commit()
-        await db.refresh(evento)
+        await db.refresh(evento, attribute_names=["id", "timestamp"])
         return evento
     except Exception:
         await db.rollback()
