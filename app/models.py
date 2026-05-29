@@ -24,7 +24,7 @@ class Usuario(Base):
     ai_control_habilitado = Column(Boolean, default=False, nullable=False)
     auto_apagado_low_priority = Column(Boolean, default=False, nullable=False)
 
-    permisos = relationship("PermisoUsuarioArtefacto", back_populates="usuario", cascade="all, delete-orphan")
+    permisos = relationship("PermisoUsuarioArtefacto", back_populates="usuario", cascade="all, delete-orphan", lazy="raise")
 
 
 class Artefacto(Base):
@@ -55,13 +55,13 @@ class Artefacto(Base):
     ai_override_until = Column(DateTime(timezone=True), nullable=True)
 
     # Cascading Relationships
-    limites = relationship("ArtefactoLimite", uselist=False, cascade="all, delete-orphan")
-    permisos_usuario = relationship("PermisoUsuarioArtefacto", back_populates="artefacto", cascade="all, delete-orphan")
-    alertas = relationship("AlertaSistema", back_populates="artefacto", cascade="all, delete-orphan")
-    credenciales = relationship("CredencialMtls", back_populates="artefacto", cascade="all, delete-orphan")
-    despliegues = relationship("DespliegueOta", back_populates="artefacto", cascade="all, delete-orphan")
-    recomendaciones = relationship("Recomendacion", back_populates="artefacto", cascade="all, delete-orphan")
-    eventos = relationship("EventoUsuario", back_populates="artefacto", cascade="all, delete-orphan")
+    limites = relationship("ArtefactoLimite", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    permisos_usuario = relationship("PermisoUsuarioArtefacto", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
+    alertas = relationship("AlertaSistema", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
+    credenciales = relationship("CredencialMtls", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
+    despliegues = relationship("DespliegueOta", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
+    recomendaciones = relationship("Recomendacion", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
+    eventos = relationship("EventoUsuario", back_populates="artefacto", cascade="all, delete-orphan", lazy="raise")
 
 
 class ArtefactoLimite(Base):
@@ -74,7 +74,7 @@ class ArtefactoLimite(Base):
     limite_potencia = Column(Numeric(8, 2), nullable=True)
     actualizado_en = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
-    artefacto = relationship("Artefacto", back_populates="limites")
+    artefacto = relationship("Artefacto", back_populates="limites", lazy="raise")
 
 
 class PermisoUsuarioArtefacto(Base):
@@ -85,8 +85,8 @@ class PermisoUsuarioArtefacto(Base):
     nivel_acceso = Column(String(20), default='ADMIN', nullable=False)
     fecha_asignacion = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
-    usuario = relationship("Usuario", back_populates="permisos")
-    artefacto = relationship("Artefacto", back_populates="permisos_usuario")
+    usuario = relationship("Usuario", back_populates="permisos", lazy="raise")
+    artefacto = relationship("Artefacto", back_populates="permisos_usuario", lazy="raise")
 
 
 # --- DEPRECATED: Use PermisoUsuarioArtefacto instead ---
@@ -107,7 +107,7 @@ class AlertaSistema(Base):
     resuelto = Column(Boolean, default=False, nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
-    artefacto = relationship("Artefacto", back_populates="alertas")
+    artefacto = relationship("Artefacto", back_populates="alertas", lazy="raise")
 
 
 class CredencialMtls(Base):
@@ -120,7 +120,7 @@ class CredencialMtls(Base):
     fecha_emision = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     estado_revocado = Column(Boolean, default=False, nullable=False)
 
-    artefacto = relationship("Artefacto", back_populates="credenciales")
+    artefacto = relationship("Artefacto", back_populates="credenciales", lazy="raise")
 
 
 class DespliegueOta(Base):
@@ -134,7 +134,7 @@ class DespliegueOta(Base):
     estado_despliegue = Column(String(50), nullable=False)
     fecha_despliegue = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
-    artefacto = relationship("Artefacto", back_populates="despliegues")
+    artefacto = relationship("Artefacto", back_populates="despliegues", lazy="raise")
 
 
 class Recomendacion(Base):
@@ -151,7 +151,7 @@ class Recomendacion(Base):
     timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     resuelto_en = Column(DateTime(timezone=True), nullable=True)
 
-    artefacto = relationship("Artefacto", back_populates="recomendaciones")
+    artefacto = relationship("Artefacto", back_populates="recomendaciones", lazy="raise")
 
 
 class EventoUsuario(Base):
@@ -164,8 +164,8 @@ class EventoUsuario(Base):
     razon_disparo = Column(String(255))
     timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
-    artefacto = relationship("Artefacto", back_populates="eventos")
-    usuario = relationship("Usuario")
+    artefacto = relationship("Artefacto", back_populates="eventos", lazy="raise")
+    usuario = relationship("Usuario", lazy="raise")
 
 
 class Telemetria(Base):
