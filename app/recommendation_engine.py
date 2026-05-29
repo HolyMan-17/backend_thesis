@@ -344,20 +344,37 @@ async def _evaluate_device(db: AsyncSession, artefacto: Artefacto) -> None:
 
 
 async def scan_all_devices() -> None:
+    # 1. Fetch the list of active devices using a short-lived database session
     async with AsyncSessionLocal() as db:
         stmt = (
-            select(Artefacto)
+            select(Artefacto.mac)
             .where(
                 Artefacto.is_online == True,
                 Artefacto.deleted_at.is_(None),
             )
-            .options(selectinload(Artefacto.limites))
         )
         result = await db.execute(stmt)
-        devices = result.scalars().all()
+        device_macs = result.scalars().all()
 
-        for device in devices:
-            await _evaluate_device(db, device)
+    # 2. Evaluate each device in its own independent database session
+    # This prevents commit() side-effects (like ORM expiration/lazy-loading) from bleeding between devices
+    for mac in device_macs:
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = (
+                    select(Artefacto)
+                    .where(
+                        Artefacto.mac == mac,
+                        Artefacto.deleted_at.is_(None),
+                    )
+                    .options(selectinload(Artefacto.limites))
+                )
+                result = await db.execute(stmt)
+                device = result.scalar_one_or_none()
+                if device:
+                    await _evaluate_device(db, device)
+        except Exception as e:
+            logger.error(f"Failed to evaluate device {mac} in dedicated session: {e}")
 
 
 async def run_recommendation_engine() -> None:
