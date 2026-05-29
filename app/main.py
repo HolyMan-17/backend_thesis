@@ -22,6 +22,7 @@ from app.schemas import (
     RecomendacionResponse, RecomendacionUpdate,
     EventoResponse,
     AgregadoResponse, AgregadoQuery,
+    HorarioUpdate, HorarioResponse,
 )
 from app.crud import (
     crear_telemetria, obtener_telemetria_por_mac,
@@ -36,9 +37,11 @@ from app.crud import (
     obtener_recomendaciones_usuario, marcar_recomendacion_resuelta,
     cancelar_auto_kill, actualizar_settings_usuario,
     crear_evento, obtener_eventos_usuario,
+    obtener_horario_dispositivo, actualizar_horario_dispositivo,
 )
 from app.mqtt_listener import iniciar_oyente_mqtt
 from app.recommendation_engine import run_recommendation_engine
+from app.schedule_engine import run_schedule_engine
 from app.ws_manager import ws_manager
 from app.auth import get_current_user, verify_sync_secret
 from app.exceptions import (
@@ -55,8 +58,10 @@ logger = logging.getLogger("uvicorn.error")
 async def lifespan(app: FastAPI):
     cliente_mqtt = iniciar_oyente_mqtt()
     engine_task = asyncio.create_task(run_recommendation_engine())
+    schedule_task = asyncio.create_task(run_schedule_engine())
     yield
     engine_task.cancel()
+    schedule_task.cancel()
     cliente_mqtt.loop_stop()
     cliente_mqtt.disconnect()
 
@@ -345,6 +350,55 @@ async def comando_limites(
     publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
 
     return {}
+
+
+# --- HORARIOS ---
+
+@app.get("/api/dispositivos/{mac}/horario", response_model=HorarioResponse)
+async def obtener_horario(
+    mac: str,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not await verificar_acceso(db, user.id, mac):
+        raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    estado = await obtener_dispositivo_por_mac(db, mac)
+    if estado is None:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    horario = await obtener_horario_dispositivo(db, mac)
+    if not horario:
+        # Devolver horario por defecto vacío
+        return HorarioResponse(
+            dias_operacion=[],
+            hora_encendido=None,
+            hora_apagado=None,
+            automatizacion_activa=False,
+            id_artefacto=estado.id,
+            actualizado_en=datetime.now(timezone.utc)
+        )
+    return horario
+
+
+@app.put("/api/dispositivos/{mac}/horario", response_model=HorarioResponse)
+async def actualizar_horario(
+    mac: str,
+    horario_in: HorarioUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    if not await verificar_acceso(db, user.id, mac):
+        raise ForbiddenException(message="Dispositivo no autorizado", mac=mac)
+
+    estado = await obtener_dispositivo_por_mac(db, mac)
+    if estado is None:
+        raise NotFoundException(message="Dispositivo no encontrado", mac=mac)
+
+    datos = horario_in.model_dump(exclude_unset=True)
+    horario = await actualizar_horario_dispositivo(db, mac, datos)
+    
+    return horario
 
 
 # --- AI CONTROL ---

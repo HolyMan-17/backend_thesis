@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone, timedelta
 from app.models import (
     Artefacto, ArtefactoLimite, Telemetria, Usuario, PermisoUsuarioArtefacto,
-    AlertaSistema, EventoUsuario, Recomendacion,
+    AlertaSistema, EventoUsuario, Recomendacion, ArtefactoHorario,
 )
 from app.schemas import TelemetriaCreate, UserSyncRequest
 
@@ -591,6 +591,45 @@ async def eliminar_dispositivo(db: AsyncSession, mac: str) -> Artefacto | None:
         await db.commit()
         await db.refresh(dispositivo)
         return dispositivo
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def obtener_horario_dispositivo(db: AsyncSession, mac: str) -> ArtefactoHorario | None:
+    stmt = (
+        select(ArtefactoHorario)
+        .join(Artefacto, Artefacto.id == ArtefactoHorario.id_artefacto)
+        .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def actualizar_horario_dispositivo(db: AsyncSession, mac: str, datos: dict) -> ArtefactoHorario | None:
+    try:
+        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+        result = await db.execute(stmt)
+        dispositivo = result.scalar_one_or_none()
+        
+        if not dispositivo:
+            return None
+            
+        stmt_horario = select(ArtefactoHorario).where(ArtefactoHorario.id_artefacto == dispositivo.id)
+        result_horario = await db.execute(stmt_horario)
+        horario = result_horario.scalar_one_or_none()
+        
+        if not horario:
+            horario = ArtefactoHorario(id_artefacto=dispositivo.id, dias_operacion=[])
+            db.add(horario)
+            
+        for k, v in datos.items():
+            if hasattr(horario, k):
+                setattr(horario, k, v)
+                
+        await db.commit()
+        await db.refresh(horario)
+        return horario
     except Exception:
         await db.rollback()
         raise

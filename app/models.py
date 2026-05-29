@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, Numeric, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, Numeric, DateTime, ForeignKey, JSON, Time
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -62,6 +62,7 @@ class Artefacto(Base):
     despliegues = relationship("DespliegueOta", back_populates="artefacto", cascade="all, delete-orphan")
     recomendaciones = relationship("Recomendacion", back_populates="artefacto", cascade="all, delete-orphan")
     eventos = relationship("EventoUsuario", back_populates="artefacto", cascade="all, delete-orphan")
+    horario = relationship("ArtefactoHorario", uselist=False, cascade="all, delete-orphan")
 
 
 class ArtefactoLimite(Base):
@@ -75,6 +76,19 @@ class ArtefactoLimite(Base):
     actualizado_en = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
     artefacto = relationship("Artefacto", back_populates="limites")
+
+
+class ArtefactoHorario(Base):
+    __tablename__ = 'artefactos_horarios'
+
+    id_artefacto = Column(Integer, ForeignKey('artefactos.id', ondelete="CASCADE"), primary_key=True)
+    dias_operacion = Column(JSON, nullable=False)
+    hora_encendido = Column(Time, nullable=True)
+    hora_apagado = Column(Time, nullable=True)
+    automatizacion_activa = Column(Boolean, default=False, nullable=False)
+    actualizado_en = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+
+    artefacto = relationship("Artefacto", back_populates="horario")
 
 
 class PermisoUsuarioArtefacto(Base):

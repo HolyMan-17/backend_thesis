@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timezone, time
+from typing import Optional, List
 import re
 
 PRIORIDAD_VALIDA = {"P1", "P2", "P3"}
@@ -88,6 +88,28 @@ class DispositivoResponse(BaseModel):
     class Config:
         from_attributes = True
         json_encoders = {datetime: _serialize_datetime}
+
+
+# --- HORARIO SCHEMAS ---
+class HorarioBase(BaseModel):
+    dias_operacion: List[int] = Field(default_factory=list, description="Días de la semana [1-7] donde 1=Lunes, 7=Domingo")
+    hora_encendido: Optional[time] = None
+    hora_apagado: Optional[time] = None
+    automatizacion_activa: bool = False
+
+class HorarioUpdate(HorarioBase):
+    pass
+
+class HorarioResponse(HorarioBase):
+    id_artefacto: int
+    actualizado_en: datetime
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: _serialize_datetime,
+            time: lambda t: t.isoformat()
+        }
 
 
 # --- COMMAND SCHEMAS ---
