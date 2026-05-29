@@ -736,7 +736,13 @@ async def verificar_lease_activo(db: AsyncSession, mac: str) -> bool:
         if not dispositivo.override_activo or dispositivo.vencimiento_lease is None:
             return False
 
-        if datetime.now(timezone.utc) >= dispositivo.vencimiento_lease:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        vencimiento = (
+            dispositivo.vencimiento_lease.replace(tzinfo=None)
+            if (dispositivo.vencimiento_lease and getattr(dispositivo.vencimiento_lease, "tzinfo", None))
+            else dispositivo.vencimiento_lease
+        )
+        if now >= vencimiento:
             dispositivo.override_activo = False
             dispositivo.vencimiento_lease = None
             await db.commit()

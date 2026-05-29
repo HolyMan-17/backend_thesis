@@ -47,7 +47,8 @@ async def _fetch_recent_telemetry(
     id_artefacto: int,
     minutes: int,
 ):
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    # Normalize current time to timezone-naive UTC for MariaDB compatibility
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes)
     stmt = (
         select(Telemetria.ai_status, Telemetria.voltaje, Telemetria.timestamp)
         .where(
@@ -61,10 +62,16 @@ async def _fetch_recent_telemetry(
 
 
 def _compute_metrics(rows, window_minutes: int):
-    now = datetime.now(timezone.utc)
+    # Normalize current time to timezone-naive UTC for in-memory comparisons
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     cutoff = now - timedelta(minutes=window_minutes)
 
-    window_rows = [(ai, v, ts) for ai, v, ts in rows if ts >= cutoff]
+    # Cleanly strip tzinfo from row timestamps (if any) to prevent offset-naive/aware TypeError
+    window_rows = []
+    for ai, v, ts in rows:
+        ts_naive = ts.replace(tzinfo=None) if (ts and getattr(ts, "tzinfo", None)) else ts
+        if ts_naive >= cutoff:
+            window_rows.append((ai, v, ts_naive))
     if not window_rows:
         return {
             "avg_ai": 0.0,
@@ -219,15 +226,28 @@ async def _get_owner_settings(db: AsyncSession, id_artefacto: int) -> Usuario | 
 async def _handle_ai_control(
     db: AsyncSession, artefacto: Artefacto, rows: list, owner: Usuario
 ) -> None:
-    now = datetime.now(timezone.utc)
+    # Normalize current time and DB datetimes to timezone-naive UTC to prevent offset mismatch errors
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    
+    ai_override_until = (
+        artefacto.ai_override_until.replace(tzinfo=None)
+        if (artefacto.ai_override_until and getattr(artefacto.ai_override_until, "tzinfo", None))
+        else artefacto.ai_override_until
+    )
+    
+    auto_kill_at = (
+        artefacto.auto_kill_at.replace(tzinfo=None)
+        if (artefacto.auto_kill_at and getattr(artefacto.auto_kill_at, "tzinfo", None))
+        else artefacto.auto_kill_at
+    )
 
-    if artefacto.ai_override_until and artefacto.ai_override_until > now:
+    if ai_override_until and ai_override_until > now:
         if artefacto.auto_kill_at:
             artefacto.auto_kill_at = None
             await db.commit()
         return
 
-    if artefacto.auto_kill_at and artefacto.auto_kill_at <= now:
+    if auto_kill_at and auto_kill_at <= now:
         label = _device_label(artefacto)
         logger.warning(f"Auto-kill executing for {artefacto.mac} ({label})")
 
@@ -247,7 +267,7 @@ async def _handle_ai_control(
         )
         return
 
-    if artefacto.auto_kill_at and artefacto.auto_kill_at > now:
+    if auto_kill_at and auto_kill_at > now:
         return
 
     short_metrics = _compute_metrics(rows, settings.AI_CONTROL_RISKY_THRESHOLD_MIN)
