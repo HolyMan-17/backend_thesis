@@ -89,35 +89,10 @@ def publish_telemetry(client):
     # 1. Carga de Potencia Constante: El router (15W)
     potencia = random.uniform(14.0, 16.0) 
 
-    # 2. MÁQUINA DE ESTADOS: Planificador de eventos eléctricos
-    if estado_red == "NORMAL":
-        # Verificamos si ya es hora del siguiente bajón
-        if tiempo_operacion_s >= proximo_bajon_s: 
-            estado_red = "BAJON"
-            ciclos_en_bajon = random.randint(2, 4) # El bajón dura entre 10s y 20s
-            voltaje_base = random.uniform(60.0, 90.0) 
-            print(f"\n📉 [GRID] ¡CAÍDA DE TENSIÓN! Evento programado alcanzado (Uptime: {tiempo_operacion_s}s)")
-            
-            # Programar el próximo bajón para dentro de 2.5 a 3.5 minutos (150s a 210s)
-            proximo_bajon_s = tiempo_operacion_s + random.randint(150, 210)
-        else:
-            voltaje_base = 120.0 - (potencia * 0.008)
-            
-    elif estado_red == "BAJON":
-        ciclos_en_bajon -= 1
-        voltaje_base = random.uniform(60.0, 90.0)
-        
-        if ciclos_en_bajon <= 0:
-            estado_red = "PICO" # Siguiente ciclo será el latigazo de recuperación
-            print(f"📉 [GRID] Subtensión severa. La red intenta reconectar...")
-        else:
-            print(f"📉 [GRID] Subtensión severa. (Quedan {ciclos_en_bajon * 5} segundos)")
-            
-    elif estado_red == "PICO":
-        # Latigazo inductivo (Sobretensión transitoria)
-        voltaje_base = random.uniform(250.0, 320.0)
-        print("\n⚡ [GRID] ¡LATIGAZO INDUCTIVO! Pico de tensión destructivo ingresando al sistema.")
-        estado_red = "NORMAL" # Regresa a la normalidad en el siguiente ciclo
+    # 2. MÁQUINA DE ESTADOS: Forzada a NORMAL para pruebas de AI Automated Control
+    # Mantiene la red eléctrica estable para que la IA clasifique el consumo de forma consistente
+    estado_red = "NORMAL"
+    voltaje_base = 120.0 - (potencia * 0.008)
 
     # 3. Aplicación de las leyes físicas de carga
     ruido = random.gauss(0, 0.2) 
@@ -141,13 +116,15 @@ def publish_telemetry(client):
         prob_safe = probabilidades[0].item()
         prob_risky = probabilidades[1].item()
         prob_critical = probabilidades[2].item()
-        
-        ai_class = torch.argmax(logits).item() 
+
+    # Forzamos el estado a 1 (RISKY) para la prueba de AI Automated Control (Auto-Kill)
+    # Esto garantiza que se mantenga continuamente en el estado de riesgo sin blips accidentales
+    ai_class = 1
 
     # Se reincorporó la probabilidad de RISKY en la consola
-    print(f"   -> {voltaje}V | {corriente}A | {potencia:.2f}W | IA (SAFE: {prob_safe:.0%} | RISKY: {prob_risky:.0%} | CRIT: {prob_critical:.0%})")
+    print(f"   -> {voltaje}V | {corriente}A | {potencia:.2f}W | IA (SAFE: {prob_safe:.0%} | RISKY: {prob_risky:.0%} | CRIT: {prob_critical:.0%}) [TEST OVERRIDE: RISKY]")
 
-    # 6. LÓGICA DE PROTECCIÓN DE HARDWARE
+    # 6. LÓGICA DE PROTECCIÓN DE HARDWARE (omitida en override para permitir que el backend sea quien mate el dispositivo)
     if ai_class == 2 and prob_critical > 0.85:
         print("\n[!!!] PROTECCIÓN ACTIVADA: ANOMALÍA CRÍTICA DETECTADA (>85%). APAGANDO RELÉ [!!!]")
         print("Esperando comando MQTT de rearme en: smartups/dispositivos/.../comando/estado\n")
@@ -164,7 +141,8 @@ def publish_telemetry(client):
         "corriente": corriente,
         "potencia": round(potencia, 2),
         "tiempo_operacion_s": tiempo_operacion_s, 
-        "ai_estado": ai_class,
+        "ai_status": ai_class, # Fixed key for backend schema!
+        "ai_estado": ai_class, # Kept for backward compatibility
         "confianza_critica": round(prob_critical, 2)
     }
     client.publish(f"smartups/dispositivos/{MAC_ESP32}/telemetria", json.dumps(telemetria), qos=1)
