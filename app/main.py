@@ -159,6 +159,7 @@ async def update_user_settings(
     return UserSettingsResponse(
         ai_control_habilitado=usuario.ai_control_habilitado,
         auto_apagado_low_priority=usuario.auto_apagado_low_priority,
+        expo_push_token=usuario.expo_push_token,
     )
 
 

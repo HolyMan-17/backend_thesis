@@ -79,7 +79,16 @@ async def _evaluate_schedules() -> None:
                     credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
                     publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
                     
-                    logger.info(f"Horario ejecutado para {dispositivo.mac}: {'Encendido' if should_be_on else 'Apagado'}")
+                    # Enviar Push
+                    from app.crud import enviar_push_a_duenos
+                    accion_str = "Encendido" if should_be_on else "Apagado"
+                    await enviar_push_a_duenos(
+                        db, dispositivo.mac,
+                        f"⏰ Automatización: {accion_str}",
+                        f"El dispositivo se ha {accion_str.lower()} según el horario programado."
+                    )
+                    
+                    logger.info(f"Horario ejecutado para {dispositivo.mac}: {accion_str}")
 
             except Exception as e:
                 logger.error(f"Error evaluating schedule for device {schedule.id_artefacto}: {e}\n{traceback.format_exc()}")

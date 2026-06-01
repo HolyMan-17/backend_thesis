@@ -201,11 +201,13 @@ class RecomendacionUpdate(BaseModel):
 class UserSettingsUpdate(BaseModel):
     ai_control_habilitado: Optional[bool] = None
     auto_apagado_low_priority: Optional[bool] = None
+    expo_push_token: Optional[str] = None
 
 
 class UserSettingsResponse(BaseModel):
     ai_control_habilitado: bool
     auto_apagado_low_priority: bool
+    expo_push_token: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -23,6 +23,7 @@ class Usuario(Base):
 
     ai_control_habilitado = Column(Boolean, default=False, nullable=False)
     auto_apagado_low_priority = Column(Boolean, default=False, nullable=False)
+    expo_push_token = Column(String(255), nullable=True)
 
     permisos = relationship("PermisoUsuarioArtefacto", back_populates="usuario", cascade="all, delete-orphan")
 

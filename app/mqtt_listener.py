@@ -210,6 +210,12 @@ async def procesar_payload(topic: str, payload: str):
                         "ai_status": ai_status,
                         "estado_reportado": False,
                     })
+                    from app.crud import enviar_push_a_duenos
+                    await enviar_push_a_duenos(
+                        db, mac_desde_topic,
+                        "🚨 Alerta Crítica BMS",
+                        f"Apagado de emergencia por {alerta_msg}"
+                    )
                     print(f"🚨 Alerta BMS {mac_desde_topic} -> {alerta_msg} (AI Status: {ai_status}) | Worker {os.getpid()}", flush=True)
                 else:
                     print(f"⚠️ Alerta BMS ignorada — artefacto no encontrado: {mac_desde_topic}", flush=True)

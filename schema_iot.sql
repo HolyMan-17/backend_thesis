@@ -16,8 +16,11 @@ CREATE TABLE usuarios (
     fecha_registro DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ultimo_acceso DATETIME NULL,
     activo BOOLEAN NOT NULL DEFAULT TRUE,
+    ai_control_habilitado BOOLEAN DEFAULT FALSE,
+    auto_apagado_low_priority BOOLEAN DEFAULT FALSE,
+    expo_push_token VARCHAR(255) DEFAULT NULL,
     CONSTRAINT uc_auth0_id UNIQUE (auth0_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. TABLA NÚCLEO (Hardware & Device Shadow)
 CREATE TABLE artefactos (

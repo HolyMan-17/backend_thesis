@@ -1107,3 +1107,27 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
     except Exception:
         await db.rollback()
         raise
+
+
+async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str):
+    try:
+        from app.models import Artefacto, PermisoUsuarioArtefacto, Usuario
+        from app.push_service import send_push_notification
+
+        stmt = (
+            select(Usuario.expo_push_token)
+            .join(PermisoUsuarioArtefacto, Usuario.id == PermisoUsuarioArtefacto.id_usuario)
+            .join(Artefacto, PermisoUsuarioArtefacto.id_artefacto == Artefacto.id)
+            .where(
+                Artefacto.mac == mac,
+                PermisoUsuarioArtefacto.nivel_acceso == "ADMIN",
+                Usuario.expo_push_token.is_not(None)
+            )
+        )
+        result = await db.execute(stmt)
+        tokens = result.scalars().all()
+        for token in tokens:
+            if token:
+                send_push_notification(token, title, body)
+    except Exception as e:
+        print(f"Error enviando push: {e}")
