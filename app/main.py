@@ -424,7 +424,33 @@ async def actualizar_horario(
 
     datos = horario_in.model_dump(exclude_unset=True)
     horario = await actualizar_horario_dispositivo(db, mac, datos)
-    
+
+    # --- Immediate evaluation: if automation is now active, check if the device
+    # should be on or off RIGHT NOW and send the MQTT command immediately.
+    if horario.automatizacion_activa and horario.hora_encendido and horario.hora_apagado and horario.dias_operacion:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo("America/Caracas")
+        now_local = datetime.now(tz)
+        current_day = now_local.isoweekday()
+        current_minutes = now_local.hour * 60 + now_local.minute
+
+        if current_day in horario.dias_operacion:
+            start_min = horario.hora_encendido.hour * 60 + horario.hora_encendido.minute
+            end_min = horario.hora_apagado.hour * 60 + horario.hora_apagado.minute
+
+            should_be_on = start_min <= current_minutes < end_min
+            device_is_on = estado.estado_deseado
+
+            if should_be_on != device_is_on:
+                await comando_estado_con_lease(
+                    db, mac, encendido=should_be_on, duracion_minutos=5, id_usuario=user.id
+                )
+                topic = f"smartups/dispositivos/{mac}/comando/estado"
+                payload = json.dumps({"encendido": should_be_on})
+                credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
+                publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
+                logger.info(f"Horario guardado para {mac}: estado inmediato {'Encendido' if should_be_on else 'Apagado'}")
+
     return horario
 
 

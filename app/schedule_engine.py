@@ -40,6 +40,9 @@ async def _evaluate_schedules() -> None:
                 if not schedule.dias_operacion or current_day not in schedule.dias_operacion:
                     continue
                 
+                if not schedule.hora_encendido or not schedule.hora_apagado:
+                    continue
+
                 # Fetch device to get mac
                 stmt_device = select(Artefacto).where(Artefacto.id == schedule.id_artefacto)
                 res_device = await db.execute(stmt_device)
@@ -48,26 +51,22 @@ async def _evaluate_schedules() -> None:
                 if not dispositivo:
                     continue
 
-                encender = False
-                apagar = False
+                # Evaluate the full time window, not just exact minute boundaries.
+                # This makes the engine self-correcting: if it misses a tick (server
+                # restart, lag), it will fix the state on the next evaluation.
+                start_min = schedule.hora_encendido.hour * 60 + schedule.hora_encendido.minute
+                end_min = schedule.hora_apagado.hour * 60 + schedule.hora_apagado.minute
+                current_min = current_time.hour * 60 + current_time.minute
 
-                # Compare hours/minutes ignoring seconds
-                if schedule.hora_encendido and schedule.hora_encendido.hour == current_time.hour and schedule.hora_encendido.minute == current_time.minute:
-                    if not dispositivo.estado_deseado:
-                        encender = True
+                should_be_on = start_min <= current_min < end_min
+                device_is_on = dispositivo.estado_deseado
 
-                if schedule.hora_apagado and schedule.hora_apagado.hour == current_time.hour and schedule.hora_apagado.minute == current_time.minute:
-                    if dispositivo.estado_deseado:
-                        apagar = True
-
-                if encender or apagar:
+                if should_be_on != device_is_on:
                     from app.crud import comando_estado_con_lease
-                    # We execute the change using lease, treating it as automated user action
-                    accion = True if encender else False
                     await comando_estado_con_lease(
                         db, 
                         dispositivo.mac, 
-                        encendido=accion, 
+                        encendido=should_be_on, 
                         duracion_minutos=5, 
                         id_usuario=None
                     )
@@ -76,11 +75,11 @@ async def _evaluate_schedules() -> None:
                     import paho.mqtt.publish as publish
                     import json
                     topic = f"smartups/dispositivos/{dispositivo.mac}/comando/estado"
-                    payload = json.dumps({"encendido": accion})
+                    payload = json.dumps({"encendido": should_be_on})
                     credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
                     publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
                     
-                    logger.info(f"Horario ejecutado para {dispositivo.mac}: {'Encendido' if accion else 'Apagado'}")
+                    logger.info(f"Horario ejecutado para {dispositivo.mac}: {'Encendido' if should_be_on else 'Apagado'}")
 
             except Exception as e:
                 logger.error(f"Error evaluating schedule for device {schedule.id_artefacto}: {e}\n{traceback.format_exc()}")

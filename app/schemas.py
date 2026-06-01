@@ -99,7 +99,14 @@ class HorarioBase(BaseModel):
     automatizacion_activa: bool = False
 
 class HorarioUpdate(HorarioBase):
-    pass
+    @field_validator('hora_apagado')
+    @classmethod
+    def validate_hora_apagado(cls, v: Optional[time], info) -> Optional[time]:
+        hora_encendido = info.data.get('hora_encendido')
+        if v is not None and hora_encendido is not None:
+            if v <= hora_encendido:
+                raise ValueError('La hora de apagado debe ser posterior a la hora de encendido')
+        return v
 
 class HorarioResponse(HorarioBase):
     id_artefacto: int
