@@ -17,6 +17,7 @@ from app.crud import (
     crear_evento,
     romper_lease_por_seguridad,
     emergencia_bms_shutdown,
+    enviar_push_a_duenos,
 )
 from app.schemas import TelemetriaCreate
 from app.config import settings
@@ -71,6 +72,11 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
                 accion="safety_override",
                 razon_disparo=f"Sobretensión {telemetria_in.voltaje:.2f}V rompe lease de usuario",
             )
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "⚡ Límite de Consumo Excedido",
+                f"El dispositivo ha sido apagado de emergencia debido a: Voltaje ({telemetria_in.voltaje:.2f}V > {float(limites.limite_voltaje):.2f}V)."
+            )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobretension")
 
@@ -87,21 +93,44 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
                 accion="safety_override",
                 razon_disparo=f"Sobrecorriente {telemetria_in.corriente:.2f}A rompe lease de usuario",
             )
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "⚡ Límite de Consumo Excedido",
+                f"El dispositivo ha sido apagado de emergencia debido a: Corriente ({telemetria_in.corriente:.2f}A > {float(limites.limite_corriente):.2f}A)."
+            )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrecorriente")
 
     if limites.limite_potencia is not None and telemetria_in.potencia > float(limites.limite_potencia):
-        await crear_alerta_si_necesario(
+        alerta = await crear_alerta_si_necesario(
             db, artefacto.id, "sobrepotencia",
             f"Potencia {telemetria_in.potencia:.2f}W excede límite {float(limites.limite_potencia):.2f}W",
             "alta",
         )
+        if alerta:
+            await romper_lease_por_seguridad(db, artefacto.mac)
+            await crear_evento(
+                db, id_artefacto=artefacto.id,
+                accion="safety_override",
+                razon_disparo=f"Sobrepotencia {telemetria_in.potencia:.2f}W rompe lease de usuario",
+            )
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "⚡ Límite de Consumo Excedido",
+                f"El dispositivo ha sido apagado de emergencia debido a: Potencia ({telemetria_in.potencia:.2f}W > {float(limites.limite_potencia):.2f}W)."
+            )
     elif limites.limite_consumo_w > 0 and telemetria_in.potencia > float(limites.limite_consumo_w):
-        await crear_alerta_si_necesario(
+        alerta = await crear_alerta_si_necesario(
             db, artefacto.id, "sobrepotencia",
             f"Potencia {telemetria_in.potencia:.2f}W excede consumo límite {float(limites.limite_consumo_w):.2f}W",
             "media",
         )
+        if alerta:
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "⚠️ Alerta de Consumo Alto",
+                f"La potencia de {telemetria_in.potencia:.2f}W excede el consumo límite configurado de {float(limites.limite_consumo_w):.2f}W."
+            )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrepotencia")
 
@@ -210,7 +239,6 @@ async def procesar_payload(topic: str, payload: str):
                         "ai_status": ai_status,
                         "estado_reportado": False,
                     })
-                    from app.crud import enviar_push_a_duenos
                     await enviar_push_a_duenos(
                         db, mac_desde_topic,
                         "🚨 Alerta Crítica BMS",

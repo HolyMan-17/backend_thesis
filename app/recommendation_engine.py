@@ -15,6 +15,7 @@ from app.crud import (
     resolver_recomendacion_auto,
     obtener_recomendaciones_resueltas_recientes,
     crear_evento,
+    enviar_push_a_duenos,
 )
 from app.config import settings
 
@@ -236,6 +237,11 @@ async def _handle_ai_control(
             await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
                 "message": f"Device is off, cancelling auto-kill warning.",
             })
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "✅ Apagado IA Cancelado",
+                f"El dispositivo se ha apagado, se canceló el apagado programado por IA."
+            )
         return
 
     # Normalize current time and DB datetimes to timezone-naive UTC to prevent offset mismatch errors
@@ -277,6 +283,11 @@ async def _handle_ai_control(
             accion="auto_kill",
             razon_disparo=f"Relay apagado automáticamente por IA (sustained RISKY)",
         )
+        await enviar_push_a_duenos(
+            db, artefacto.mac,
+            "⚡ Dispositivo Apagado",
+            f"El dispositivo {label} fue apagado automáticamente debido a consumo excesivo prolongado."
+        )
         return
 
     if auto_kill_at and auto_kill_at > now:
@@ -287,13 +298,17 @@ async def _handle_ai_control(
 
     sustained_risky = short_metrics["count"] >= min_count and short_metrics["avg_ai"] >= 1.0
 
-    if not sustained_risky:
         if artefacto.auto_kill_at:
             artefacto.auto_kill_at = None
             await db.commit()
             await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
                 "message": f"Risk condition cleared for {_device_label(artefacto)}.",
             })
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "✅ Apagado IA Cancelado",
+                f"El consumo de {_device_label(artefacto)} se normalizó y se canceló el apagado programado."
+            )
         return
 
     label = _device_label(artefacto)
@@ -313,6 +328,11 @@ async def _handle_ai_control(
             accion="auto_kill",
             razon_disparo=f"Relay apagado automáticamente (P3 auto-apagado, AI status RISKY)",
         )
+        await enviar_push_a_duenos(
+            db, artefacto.mac,
+            "⚡ Dispositivo Apagado",
+            f"El dispositivo {label} (P3) fue apagado automáticamente debido a consumo excesivo prolongado."
+        )
         return
 
     if owner.ai_control_habilitado:
@@ -325,6 +345,11 @@ async def _handle_ai_control(
             "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
             "accion_sugerida": "keep_on",
         })
+        await enviar_push_a_duenos(
+            db, artefacto.mac,
+            "⚠️ Apagado IA Programado",
+            f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
+        )
 
 
 async def _evaluate_device(db: AsyncSession, artefacto: Artefacto) -> None:
