@@ -3,11 +3,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone, timedelta
+import logging
 from app.models import (
     Artefacto, ArtefactoLimite, Telemetria, Usuario, PermisoUsuarioArtefacto,
     AlertaSistema, EventoUsuario, Recomendacion, ArtefactoHorario,
 )
 from app.schemas import TelemetriaCreate, UserSyncRequest
+
+logger = logging.getLogger("smartsaver.crud")
 
 
 # ---------------------------------------------------------------------------
@@ -1110,12 +1113,12 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
 
 
 async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str):
+    """Send push notification to all ADMIN owners of a device. Cleans stale tokens."""
     try:
-        from app.models import Artefacto, PermisoUsuarioArtefacto, Usuario
         from app.push_service import send_push_notification
 
         stmt = (
-            select(Usuario.expo_push_token)
+            select(Usuario.id, Usuario.expo_push_token)
             .join(PermisoUsuarioArtefacto, Usuario.id == PermisoUsuarioArtefacto.id_usuario)
             .join(Artefacto, PermisoUsuarioArtefacto.id_artefacto == Artefacto.id)
             .where(
@@ -1125,9 +1128,21 @@ async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str
             )
         )
         result = await db.execute(stmt)
-        tokens = result.scalars().all()
-        for token in tokens:
-            if token:
-                send_push_notification(token, title, body)
+        rows = result.all()
+
+        for user_id, token in rows:
+            if not token:
+                continue
+            try:
+                token_valid = await send_push_notification(token, title, body)
+                if not token_valid:
+                    # Token is stale (DeviceNotRegistered) — clear it
+                    stale_user = await db.get(Usuario, user_id)
+                    if stale_user:
+                        stale_user.expo_push_token = None
+                        await db.commit()
+                        logger.info(f"Cleared stale push token for user {user_id}")
+            except Exception as push_err:
+                logger.error(f"Failed to send push to user {user_id}: {push_err}")
     except Exception as e:
-        print(f"Error enviando push: {e}")
+        logger.error(f"Error in enviar_push_a_duenos for {mac}: {e}")

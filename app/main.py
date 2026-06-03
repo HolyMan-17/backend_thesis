@@ -41,7 +41,7 @@ from app.crud import (
 )
 from app.mqtt_listener import iniciar_oyente_mqtt
 from app.recommendation_engine import run_recommendation_engine
-from app.schedule_engine import run_schedule_engine
+from app.schedule_engine import run_schedule_engine, check_should_be_on
 from app.ws_manager import ws_manager
 from app.auth import get_current_user, verify_sync_secret
 from app.exceptions import (
@@ -139,6 +139,7 @@ async def get_user_settings(
     return UserSettingsResponse(
         ai_control_habilitado=user.ai_control_habilitado,
         auto_apagado_low_priority=user.auto_apagado_low_priority,
+        expo_push_token=user.expo_push_token,
     )
 
 
@@ -435,22 +436,27 @@ async def actualizar_horario(
         current_day = now_local.isoweekday()
         current_minutes = now_local.hour * 60 + now_local.minute
 
-        if current_day in horario.dias_operacion:
-            start_min = horario.hora_encendido.hour * 60 + horario.hora_encendido.minute
-            end_min = horario.hora_apagado.hour * 60 + horario.hora_apagado.minute
+        start_min = horario.hora_encendido.hour * 60 + horario.hora_encendido.minute
+        end_min = horario.hora_apagado.hour * 60 + horario.hora_apagado.minute
 
-            should_be_on = start_min <= current_minutes < end_min
-            device_is_on = estado.estado_deseado
+        should_be_on = check_should_be_on(
+            current_day=current_day,
+            current_min=current_minutes,
+            dias_operacion=horario.dias_operacion,
+            start_min=start_min,
+            end_min=end_min
+        )
+        device_is_on = estado.estado_deseado
 
-            if should_be_on != device_is_on:
-                await comando_estado_con_lease(
-                    db, mac, encendido=should_be_on, duracion_minutos=5, id_usuario=user.id
-                )
-                topic = f"smartups/dispositivos/{mac}/comando/estado"
-                payload = json.dumps({"encendido": should_be_on})
-                credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
-                publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
-                logger.info(f"Horario guardado para {mac}: estado inmediato {'Encendido' if should_be_on else 'Apagado'}")
+        if should_be_on != device_is_on:
+            await comando_estado_con_lease(
+                db, mac, encendido=should_be_on, duracion_minutos=5, id_usuario=user.id
+            )
+            topic = f"smartups/dispositivos/{mac}/comando/estado"
+            payload = json.dumps({"encendido": should_be_on})
+            credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
+            publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
+            logger.info(f"Horario guardado para {mac}: estado inmediato {'Encendido' if should_be_on else 'Apagado'}")
 
     return horario
 

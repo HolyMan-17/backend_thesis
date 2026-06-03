@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone, time, timedelta
 from typing import Optional, List
 import re
 
@@ -97,6 +97,30 @@ class HorarioBase(BaseModel):
     hora_encendido: Optional[time] = None
     hora_apagado: Optional[time] = None
     automatizacion_activa: bool = False
+
+    @field_validator('hora_encendido', 'hora_apagado', mode='before')
+    @classmethod
+    def parse_time_or_timedelta(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, time):
+            return v
+        if isinstance(v, timedelta):
+            total_seconds = int(v.total_seconds())
+            hours = (total_seconds // 3600) % 24
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            return time(hour=hours, minute=minutes, second=seconds)
+        if isinstance(v, str):
+            try:
+                parts = list(map(int, v.split(':')))
+                if len(parts) == 2:
+                    return time(hour=parts[0], minute=parts[1])
+                elif len(parts) == 3:
+                    return time(hour=parts[0], minute=parts[1], second=parts[2])
+            except (ValueError, IndexError):
+                pass
+        return v
 
 class HorarioUpdate(HorarioBase):
     @field_validator('hora_apagado')

@@ -10,3 +10,4 @@ python-jose[cryptography]==3.4.0
 pydantic-settings==2.9.1
 slowapi==0.1.9
 httpx==0.28.1
+exponent-server-sdk==2.1.0
