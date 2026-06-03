@@ -298,6 +298,7 @@ async def _handle_ai_control(
 
     sustained_risky = short_metrics["count"] >= min_count and short_metrics["avg_ai"] >= 1.0
 
+    if not sustained_risky:
         if artefacto.auto_kill_at:
             artefacto.auto_kill_at = None
             await db.commit()
