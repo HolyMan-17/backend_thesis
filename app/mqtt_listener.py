@@ -43,13 +43,15 @@ async def _broadcast_event(mac: str, event_type: str, data: dict):
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
-        print(f"🔌 Worker {os.getpid()} de FastAPI conectado a Mosquitto", flush=True)
-        client.subscribe("smartups/dispositivos/+/telemetria")
-        client.subscribe("smartups/dispositivos/+/conexion")
-        client.subscribe("smartups/dispositivos/+/reporte/estado")
-        client.subscribe("smartups/dispositivos/+/reporte/limites")
-        client.subscribe("smartups/dispositivos/+/provisionamiento")
-        client.subscribe("smartups/dispositivos/+/alerta")
+        print(f"🔌 Worker {os.getpid()} de FastAPI conectado a Mosquitto (Shared Subscriptions)", flush=True)
+        # Usar subscripciones compartidas ($share/backend/...) para balancear carga
+        # y evitar que los 4 workers procesen el mismo mensaje y envíen 4 notificaciones
+        client.subscribe("$share/backend/smartups/dispositivos/+/telemetria")
+        client.subscribe("$share/backend/smartups/dispositivos/+/conexion")
+        client.subscribe("$share/backend/smartups/dispositivos/+/reporte/estado")
+        client.subscribe("$share/backend/smartups/dispositivos/+/reporte/limites")
+        client.subscribe("$share/backend/smartups/dispositivos/+/provisionamiento")
+        client.subscribe("$share/backend/smartups/dispositivos/+/alerta")
     else:
         print(f"❌ Error conectando Worker {os.getpid()}. Código: {reason_code}", flush=True)
 
