@@ -406,6 +406,7 @@ async def scan_all_devices() -> None:
                         Artefacto.deleted_at.is_(None),
                     )
                     .options(selectinload(Artefacto.limites))
+                    .with_for_update()
                 )
                 result = await db.execute(stmt)
                 device = result.scalar_one_or_none()

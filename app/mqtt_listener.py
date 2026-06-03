@@ -191,15 +191,16 @@ async def procesar_payload(topic: str, payload: str):
                 if subtipo == "estado":
                     encendido = data.get("encendido")
                     if encendido is not None:
-                        await actualizar_estado_reportado(db, mac_desde_topic, encendido=bool(encendido))
-                        dispositivo = await obtener_dispositivo_por_mac(db, mac_desde_topic)
-                        if dispositivo:
-                            await crear_evento(
-                                db,
-                                id_artefacto=dispositivo.id,
-                                accion="reporte_estado",
-                                razon_disparo=f"Relay {'encendido' if encendido else 'apagado'}",
-                            )
+                        cambio = await actualizar_estado_reportado(db, mac_desde_topic, encendido=bool(encendido))
+                        if cambio:
+                            dispositivo = await obtener_dispositivo_por_mac(db, mac_desde_topic)
+                            if dispositivo:
+                                await crear_evento(
+                                    db,
+                                    id_artefacto=dispositivo.id,
+                                    accion="reporte_estado",
+                                    razon_disparo=f"Relay {'encendido' if encendido else 'apagado'}",
+                                )
                         estado_str = "ON 🟢" if encendido else "OFF 🔴"
                         print(f"📡 Reporte estado {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
 
@@ -232,18 +233,20 @@ async def procesar_payload(topic: str, payload: str):
                 alerta_msg = data.get("alerta", "Alerta BMS crítica")
                 ai_status = data.get("ai_status", 2)
 
-                dispositivo = await emergencia_bms_shutdown(db, mac_desde_topic, alerta_msg, ai_status)
-                if dispositivo:
+                res = await emergencia_bms_shutdown(db, mac_desde_topic, alerta_msg, ai_status)
+                if res:
+                    dispositivo, alerta_creada = res
                     await _broadcast_event(mac_desde_topic, "alerta", {
                         "alerta": alerta_msg,
                         "ai_status": ai_status,
                         "estado_reportado": False,
                     })
-                    await enviar_push_a_duenos(
-                        db, mac_desde_topic,
-                        "🚨 Alerta Crítica BMS",
-                        f"Apagado de emergencia por {alerta_msg}"
-                    )
+                    if alerta_creada:
+                        await enviar_push_a_duenos(
+                            db, mac_desde_topic,
+                            "🚨 Alerta Crítica BMS",
+                            f"Apagado de emergencia por {alerta_msg}"
+                        )
                     print(f"🚨 Alerta BMS {mac_desde_topic} -> {alerta_msg} (AI Status: {ai_status}) | Worker {os.getpid()}", flush=True)
                 else:
                     print(f"⚠️ Alerta BMS ignorada — artefacto no encontrado: {mac_desde_topic}", flush=True)

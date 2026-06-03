@@ -122,6 +122,7 @@ async def obtener_dispositivo_por_telemetria(db: AsyncSession, mac: str) -> Arte
         select(Artefacto)
         .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
         .options(selectinload(Artefacto.limites))
+        .with_for_update()
     )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
@@ -153,14 +154,21 @@ async def actualizar_estado_deseado(db: AsyncSession, mac: str, encendido: bool)
 
 async def actualizar_estado_reportado(db: AsyncSession, mac: str, encendido: bool) -> bool:
     try:
-        stmt = select(Artefacto).where(
-            Artefacto.mac == mac,
-            Artefacto.deleted_at.is_(None),
+        stmt = (
+            select(Artefacto)
+            .where(
+                Artefacto.mac == mac,
+                Artefacto.deleted_at.is_(None),
+            )
+            .with_for_update()
         )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
 
         if not dispositivo:
+            return False
+
+        if dispositivo.estado_reportado == encendido:
             return False
 
         dispositivo.estado_reportado = encendido
@@ -369,17 +377,21 @@ async def actualizar_settings_usuario(db: AsyncSession, user_id: int, datos: dic
 
 
 async def verificar_cambio_online(db: AsyncSession, mac: str, new_state: bool) -> bool:
-    stmt = select(Artefacto.is_online).where(
-        Artefacto.mac == mac,
-        Artefacto.deleted_at.is_(None),
+    stmt = (
+        select(Artefacto)
+        .where(
+            Artefacto.mac == mac,
+            Artefacto.deleted_at.is_(None),
+        )
+        .with_for_update()
     )
     result = await db.execute(stmt)
-    row = result.first()
+    dispositivo = result.scalar_one_or_none()
 
-    if row is None:
+    if dispositivo is None:
         return False
 
-    old_state = bool(row[0])
+    old_state = dispositivo.is_online
     return old_state != new_state
 
 
@@ -1064,9 +1076,13 @@ async def obtener_eventos_usuario(
 # EMERGENCY BMS SHUTDOWN
 # ---------------------------------------------------------------------------
 
-async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, ai_status: int) -> Artefacto | None:
+async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, ai_status: int) -> tuple[Artefacto, bool] | None:
     try:
-        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .with_for_update()
+        )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
 
@@ -1088,6 +1104,7 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
         result_alerta = await db.execute(stmt_alerta)
         alerta_existente = result_alerta.scalar_one_or_none()
 
+        alerta_creada = False
         if not alerta_existente:
             alerta = AlertaSistema(
                 id_artefacto=dispositivo.id,
@@ -1096,6 +1113,7 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
                 severidad="critica",
             )
             db.add(alerta)
+            alerta_creada = True
 
         evento = EventoUsuario(
             id_artefacto=dispositivo.id,
@@ -1106,7 +1124,7 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
 
         await db.commit()
         await db.refresh(dispositivo)
-        return dispositivo
+        return dispositivo, alerta_creada
     except Exception:
         await db.rollback()
         raise
@@ -1130,9 +1148,11 @@ async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str
         result = await db.execute(stmt)
         rows = result.all()
 
+        tokens_enviados = set()
         for user_id, token in rows:
-            if not token:
+            if not token or token in tokens_enviados:
                 continue
+            tokens_enviados.add(token)
             try:
                 token_valid = await send_push_notification(token, title, body)
                 if not token_valid:
