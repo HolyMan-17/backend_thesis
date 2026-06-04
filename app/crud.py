@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 from app.models import (
     Artefacto, ArtefactoLimite, Telemetria, Usuario, PermisoUsuarioArtefacto,
-    AlertaSistema, EventoUsuario, Recomendacion, ArtefactoHorario,
+    AlertaSistema, EventoUsuario, Recomendacion, ArtefactoHorario, NotificacionUsuario,
 )
 from app.schemas import TelemetriaCreate, UserSyncRequest
 
@@ -1050,7 +1050,7 @@ async def comando_estado_con_lease(
             id_artefacto=dispositivo.id,
             id_usuario=id_usuario,
             accion="comando_estado",
-            razon_disparo=f"Relay {'encendido' if encendido else 'apagado'} por usuario (lease activado)",
+            razon_disparo=f"Relay {'encendido' if encendido else 'apagado'} por usuario (bloqueo por el usuario activado)",
         )
         db.add(evento)
 
@@ -1144,44 +1144,151 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
         raise
 
 
+async def registrar_notificacion_usuario(
+    db: AsyncSession,
+    id_usuario: int,
+    titulo: str,
+    cuerpo: str,
+) -> NotificacionUsuario:
+    try:
+        notif = NotificacionUsuario(
+            id_usuario=id_usuario,
+            titulo=titulo,
+            cuerpo=cuerpo,
+        )
+        db.add(notif)
+        await db.commit()
+        await db.refresh(notif)
+        return notif
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def obtener_notificaciones_usuario(
+    db: AsyncSession,
+    id_usuario: int,
+) -> list[NotificacionUsuario]:
+    try:
+        stmt = (
+            select(NotificacionUsuario)
+            .where(
+                NotificacionUsuario.id_usuario == id_usuario,
+                NotificacionUsuario.eliminado == False,
+            )
+            .order_by(NotificacionUsuario.timestamp.desc())
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+    except Exception:
+        raise
+
+
+async def actualizar_notificacion_usuario(
+    db: AsyncSession,
+    id_notificacion: int,
+    id_usuario: int,
+    datos: dict,
+) -> NotificacionUsuario | None:
+    try:
+        stmt = (
+            select(NotificacionUsuario)
+            .where(
+                NotificacionUsuario.id == id_notificacion,
+                NotificacionUsuario.id_usuario == id_usuario,
+            )
+        )
+        result = await db.execute(stmt)
+        notif = result.scalar_one_or_none()
+        if not notif:
+            return None
+        for k, v in datos.items():
+            if hasattr(notif, k):
+                setattr(notif, k, v)
+        await db.commit()
+        await db.refresh(notif)
+        return notif
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def eliminar_todas_notificaciones_usuario(
+    db: AsyncSession,
+    id_usuario: int,
+) -> None:
+    try:
+        from sqlalchemy import update
+        stmt = (
+            update(NotificacionUsuario)
+            .where(
+                NotificacionUsuario.id_usuario == id_usuario,
+                NotificacionUsuario.eliminado == False,
+            )
+            .values(eliminado=True)
+        )
+        await db.execute(stmt)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+
 async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str):
-    """Send push notification to all ADMIN owners of a device. Cleans stale tokens."""
+    """Persist notification for all ADMIN owners of a device and send push to those with tokens."""
     try:
         from app.push_service import send_push_notification
 
+        # Fetch all admin owner users
         stmt = (
-            select(Usuario.id, Usuario.expo_push_token)
+            select(Usuario)
             .join(PermisoUsuarioArtefacto, Usuario.id == PermisoUsuarioArtefacto.id_usuario)
             .join(Artefacto, PermisoUsuarioArtefacto.id_artefacto == Artefacto.id)
             .where(
                 Artefacto.mac == mac,
                 PermisoUsuarioArtefacto.nivel_acceso == "ADMIN",
-                Usuario.expo_push_token.is_not(None)
             )
         )
         result = await db.execute(stmt)
-        rows = result.all()
+        usuarios = result.scalars().all()
 
         tokens_enviados = set()
-        for user_id, token in rows:
+        for user in usuarios:
+            notif_id = None
+            # 1. Register notification in backend database log for this user
+            try:
+                notif = NotificacionUsuario(
+                    id_usuario=user.id,
+                    titulo=title,
+                    cuerpo=body,
+                )
+                db.add(notif)
+                await db.commit()
+                await db.refresh(notif)
+                notif_id = notif.id
+            except Exception as e_db:
+                logger.error(f"Failed to log notification for user {user.id} in DB: {e_db}")
+                await db.rollback()
+
+            # 2. Asynchronously send push notification if token exists
+            token = user.expo_push_token
             if not token or token in tokens_enviados:
                 continue
             tokens_enviados.add(token)
+
             try:
-                token_valid = await send_push_notification(token, title, body)
+                extra_payload = {"backendId": notif_id} if notif_id else None
+                token_valid = await send_push_notification(token, title, body, extra=extra_payload)
                 if not token_valid:
                     # Token is stale (DeviceNotRegistered) — clear it
-                    stale_user = await db.get(Usuario, user_id)
-                    if stale_user:
-                        stale_user.expo_push_token = None
-                        try:
-                            await db.commit()
-                            logger.info(f"Cleared stale push token for user {user_id}")
-                        except Exception:
-                            await db.rollback()
-                            raise
+                    user.expo_push_token = None
+                    try:
+                        await db.commit()
+                        logger.info(f"Cleared stale push token for user {user.id}")
+                    except Exception:
+                        await db.rollback()
             except Exception as push_err:
-                logger.error(f"Failed to send push to user {user_id}: {push_err}")
+                logger.error(f"Failed to send push to user {user.id}: {push_err}")
     except Exception as e:
         logger.error(f"Error in enviar_push_a_duenos for {mac}: {e}")
 

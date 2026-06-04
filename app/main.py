@@ -23,6 +23,7 @@ from app.schemas import (
     EventoResponse,
     AgregadoResponse, AgregadoQuery,
     HorarioUpdate, HorarioResponse,
+    NotificacionUsuarioResponse, NotificacionUsuarioUpdate,
 )
 from app.crud import (
     crear_telemetria, obtener_telemetria_por_mac,
@@ -38,6 +39,8 @@ from app.crud import (
     cancelar_auto_kill, actualizar_settings_usuario,
     crear_evento, obtener_eventos_usuario,
     obtener_horario_dispositivo, actualizar_horario_dispositivo,
+    obtener_notificaciones_usuario, actualizar_notificacion_usuario,
+    eliminar_todas_notificaciones_usuario,
 )
 from app.mqtt_listener import iniciar_oyente_mqtt
 from app.recommendation_engine import run_recommendation_engine
@@ -651,6 +654,55 @@ async def resolver_recomendacion(
         result.mac_dispositivo = device.mac
         result.nombre_personalizado = device.nombre_personalizado
     return result
+
+
+# --- USER NOTIFICATIONS ---
+
+@app.get("/api/notifications", response_model=List[NotificacionUsuarioResponse])
+async def listar_notificaciones(
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    notificaciones = await obtener_notificaciones_usuario(db, user.id)
+    return notificaciones
+
+
+@app.patch("/api/notifications/{notif_id}", response_model=NotificacionUsuarioResponse)
+async def actualizar_notificacion(
+    notif_id: int,
+    notif_in: NotificacionUsuarioUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    datos = notif_in.model_dump(exclude_unset=True)
+    if not datos:
+        raise AppException(error="validation_error", message="No fields to update", status_code=422)
+
+    notif = await actualizar_notificacion_usuario(db, notif_id, user.id, datos)
+    if not notif:
+        raise NotFoundException(message="Notificación no encontrada", notif_id=notif_id)
+    return notif
+
+
+@app.delete("/api/notifications/{notif_id}")
+async def eliminar_notificacion(
+    notif_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    notif = await actualizar_notificacion_usuario(db, notif_id, user.id, {"eliminado": True})
+    if not notif:
+        raise NotFoundException(message="Notificación no encontrada", notif_id=notif_id)
+    return {"status": "deleted", "id": notif_id}
+
+
+@app.delete("/api/notifications")
+async def eliminar_todas_notificaciones(
+    db: AsyncSession = Depends(get_db),
+    user: Usuario = Depends(get_current_user),
+):
+    await eliminar_todas_notificaciones_usuario(db, user.id)
+    return {"status": "all_deleted"}
 
 
 # --- EVENTS ---

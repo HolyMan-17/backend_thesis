@@ -77,7 +77,7 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
-                razon_disparo=f"Sobretensión {telemetria_in.voltaje:.2f}V rompe lease de usuario",
+                razon_disparo=f"Sobretensión {telemetria_in.voltaje:.2f}V rompe bloqueo de usuario",
             )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobretension")
@@ -96,7 +96,7 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
-                razon_disparo=f"Sobrecorriente {telemetria_in.corriente:.2f}A rompe lease de usuario",
+                razon_disparo=f"Sobrecorriente {telemetria_in.corriente:.2f}A rompe bloqueo de usuario",
             )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrecorriente")
@@ -115,7 +115,7 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
-                razon_disparo=f"Sobrepotencia {telemetria_in.potencia:.2f}W rompe lease de usuario",
+                razon_disparo=f"Sobrepotencia {telemetria_in.potencia:.2f}W rompe bloqueo de usuario",
             )
     elif limites.limite_consumo_w > 0 and telemetria_in.potencia > float(limites.limite_consumo_w):
         alerta = await crear_alerta_si_necesario(
