@@ -91,13 +91,26 @@ async def get_current_user(
     if not user:
         raise ForbiddenException(message="User not found or inactive", auth0_id=auth0_id)
 
-    from sqlalchemy import func as sa_func
-    user.ultimo_acceso = sa_func.now()
-    try:
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
+    # Throttle updates to user.ultimo_acceso to at most once every 15 minutes (900 seconds)
+    # to prevent write lock contention and excessive DB write commits on concurrent API requests.
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    should_update = False
+    if not user.ultimo_acceso:
+        should_update = True
+    else:
+        ts = user.ultimo_acceso.replace(tzinfo=None) if getattr(user.ultimo_acceso, "tzinfo", None) else user.ultimo_acceso
+        if (now.replace(tzinfo=None) - ts).total_seconds() > 900:
+            should_update = True
+
+    if should_update:
+        from sqlalchemy import func as sa_func
+        user.ultimo_acceso = sa_func.now()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     request.state.user = user
 

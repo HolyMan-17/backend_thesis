@@ -566,9 +566,10 @@ async def actualizar_dispositivo(db: AsyncSession, mac: str, datos: dict) -> Art
             select(Artefacto)
             .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
             .options(
-            selectinload(Artefacto.limites),
-            selectinload(Artefacto.horario)
-        )
+                selectinload(Artefacto.limites),
+                selectinload(Artefacto.horario)
+            )
+            .with_for_update()
         )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
@@ -791,9 +792,13 @@ async def activar_lease_usuario(db: AsyncSession, mac: str, duracion_minutos: in
 
 async def verificar_lease_activo(db: AsyncSession, mac: str) -> bool:
     try:
-        stmt = select(Artefacto).where(
-            Artefacto.mac == mac,
-            Artefacto.deleted_at.is_(None),
+        stmt = (
+            select(Artefacto)
+            .where(
+                Artefacto.mac == mac,
+                Artefacto.deleted_at.is_(None),
+            )
+            .with_for_update()
         )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
@@ -843,7 +848,11 @@ async def romper_lease_por_seguridad(db: AsyncSession, mac: str) -> Artefacto | 
 
 async def cancelar_auto_kill(db: AsyncSession, mac: str, cooldown_minutes: int = 30) -> Artefacto | None:
     try:
-        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .with_for_update()
+        )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
 
@@ -1032,7 +1041,11 @@ async def comando_estado_con_lease(
 ) -> Artefacto | None:
     """Set estado_deseado + activate lease + log event in a single transaction."""
     try:
-        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .with_for_update()
+        )
         result = await db.execute(stmt)
         dispositivo = result.scalar_one_or_none()
 
@@ -1273,12 +1286,14 @@ async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str
                     cuerpo=body,
                 )
                 db.add(notif)
-                await db.commit()
-                await db.refresh(notif)
+                await db.flush()
                 notif_id = notif.id
             except Exception as e_db:
                 logger.error(f"Failed to log notification for user {user.id} in DB: {e_db}")
-                await db.rollback()
+                try:
+                    db.expunge(notif)
+                except Exception:
+                    pass
 
             # 2. Asynchronously send push notification if token exists
             token = user.expo_push_token
@@ -1292,13 +1307,16 @@ async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str
                 if not token_valid:
                     # Token is stale (DeviceNotRegistered) — clear it
                     user.expo_push_token = None
-                    try:
-                        await db.commit()
-                        logger.info(f"Cleared stale push token for user {user.id}")
-                    except Exception:
-                        await db.rollback()
+                    logger.info(f"Cleared stale push token for user {user.id} (pending commit)")
             except Exception as push_err:
                 logger.error(f"Failed to send push to user {user.id}: {push_err}")
+
+        # Single consolidated commit for all notifications and updated tokens
+        try:
+            await db.commit()
+        except Exception as e_commit:
+            logger.error(f"Failed to commit notifications/tokens in enviar_push_a_duenos for {mac}: {e_commit}")
+            await db.rollback()
     except Exception as e:
         logger.error(f"Error in enviar_push_a_duenos for {mac}: {e}")
 

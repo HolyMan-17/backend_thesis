@@ -16,6 +16,7 @@ from app.crud import (
     obtener_recomendaciones_resueltas_recientes,
     crear_evento,
     enviar_push_a_duenos,
+    verificar_lease_activo,
 )
 from app.config import settings
 
@@ -38,10 +39,18 @@ async def _publish_mqtt(mac: str, payload: dict):
 
 async def _broadcast_event(mac: str, event_type: str, data: dict):
     try:
-        from app.ws_manager import ws_manager
-        await ws_manager.broadcast_event(mac, event_type, data)
-    except Exception:
-        pass
+        import paho.mqtt.publish as mqtt_publish
+        import json
+        topic = f"smartups/dispositivos/{mac}/broadcast/{event_type}"
+        payload = json.dumps(data)
+        mqtt_publish.single(
+            topic, payload,
+            hostname=settings.MQTT_HOST,
+            port=settings.MQTT_PORT,
+            auth={"username": settings.MQTT_USER, "password": settings.MQTT_PASS},
+        )
+    except Exception as e:
+        logger.error(f"MQTT broadcast publish error for {mac}: {e}")
 
 
 async def _fetch_recent_telemetry(
@@ -268,10 +277,15 @@ async def _handle_ai_control(
             return
 
         if auto_kill_at and auto_kill_at <= now:
+            if await verificar_lease_activo(db, artefacto.mac):
+                logger.info(f"Auto-kill skipped for {artefacto.mac} due to active user override lease.")
+                return
+
             label = _device_label(artefacto)
             logger.warning(f"Auto-kill executing for {artefacto.mac} ({label})")
 
             artefacto.estado_deseado = False
+            artefacto.estado_reportado = False
             artefacto.auto_kill_at = None
 
             # Disable active schedule automation for protection
@@ -329,8 +343,13 @@ async def _handle_ai_control(
         label = _device_label(artefacto)
 
         if owner.auto_apagado_low_priority and artefacto.nivel_prioridad == "P3":
+            if await verificar_lease_activo(db, artefacto.mac):
+                logger.info(f"P3 auto-kill skipped for {artefacto.mac} due to active user override lease.")
+                return
+
             logger.warning(f"P3 auto-kill executing for {artefacto.mac} ({label})")
             artefacto.estado_deseado = False
+            artefacto.estado_reportado = False
 
             # Disable active schedule automation for protection
             automation_disabled = False

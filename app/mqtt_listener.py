@@ -26,22 +26,28 @@ _main_loop = None
 
 
 async def _broadcast_telemetry(mac: str, data: dict):
-    try:
-        from app.ws_manager import ws_manager
-        await ws_manager.broadcast_telemetry(mac, data)
-    except Exception:
-        pass
+    # This is a no-op now because client_ws receives the telemetry directly via MQTT and broadcasts it.
+    pass
 
 
 async def _broadcast_event(mac: str, event_type: str, data: dict):
     try:
-        from app.ws_manager import ws_manager
-        await ws_manager.broadcast_event(mac, event_type, data)
-    except Exception:
-        pass
+        # Publish event to Mosquitto so all workers' local clients broadcast it
+        import paho.mqtt.publish as mqtt_publish
+        import json
+        topic = f"smartups/dispositivos/{mac}/broadcast/{event_type}"
+        payload = json.dumps(data)
+        mqtt_publish.single(
+            topic, payload,
+            hostname=settings.MQTT_HOST,
+            port=settings.MQTT_PORT,
+            auth={"username": settings.MQTT_USER, "password": settings.MQTT_PASS},
+        )
+    except Exception as e:
+        print(f"❌ Error publishing WS event {event_type} for {mac}: {e}", flush=True)
 
 
-def on_connect(client, userdata, flags, reason_code, properties):
+def on_connect_db(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         print(f"🔌 Worker {os.getpid()} de FastAPI conectado a Mosquitto (Shared Subscriptions)", flush=True)
         # Usar subscripciones compartidas ($share/backend/...) para balancear carga
@@ -53,7 +59,18 @@ def on_connect(client, userdata, flags, reason_code, properties):
         client.subscribe("$share/backend/smartups/dispositivos/+/provisionamiento")
         client.subscribe("$share/backend/smartups/dispositivos/+/alerta")
     else:
-        print(f"❌ Error conectando Worker {os.getpid()}. Código: {reason_code}", flush=True)
+        print(f"❌ Error conectando Worker {os.getpid()} (DB). Código: {reason_code}", flush=True)
+
+
+def on_connect_ws(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print(f"📡 Worker {os.getpid()} de FastAPI conectado a Mosquitto (Local WS Subscriptions)", flush=True)
+        # Direct local subscriptions to receive messages across all workers for WebSocket broadcasting
+        client.subscribe("smartups/dispositivos/+/telemetria")
+        client.subscribe("smartups/dispositivos/+/conexion")
+        client.subscribe("smartups/dispositivos/+/broadcast/+")
+    else:
+        print(f"❌ Error conectando Worker {os.getpid()} (WS). Código: {reason_code}", flush=True)
 
 
 async def _verificar_alertas(db, artefacto, telemetria_in):
@@ -134,10 +151,13 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
 
     # --- Single consolidated push notification + lease break + device shutdown ---
     if violaciones_criticas:
-        await romper_lease_por_seguridad(db, artefacto.mac)
+        # Break user lease for safety
+        artefacto.override_activo = False
+        artefacto.vencimiento_lease = None
 
         # Turn off the device via DB + MQTT command
         artefacto.estado_deseado = False
+        artefacto.estado_reportado = False
         
         # Disable active schedule automation for protection
         automation_disabled = False
@@ -200,7 +220,8 @@ async def procesar_payload(topic: str, payload: str):
                     if artefacto:
                         await _verificar_alertas(db, artefacto, telemetria_in)
 
-                    await _broadcast_telemetry(mac_desde_topic, data)
+                    # Broadcast is handled by the local WS client
+                    pass
                 else:
                     print(f"⚠️ Worker {os.getpid()}: Artefacto no provisionado ignorado ({mac_desde_topic}).", flush=True)
 
@@ -212,7 +233,8 @@ async def procesar_payload(topic: str, payload: str):
                     ok, cambio = await procesar_cambio_conexion(db, mac_desde_topic, online=estado_bool)
                     if ok:
                         if cambio:
-                            await _broadcast_event(mac_desde_topic, "conexion", {"is_online": estado_bool})
+                            # Broadcast is handled by the local WS client
+                            pass
                         estado_str = "Online 🟢" if estado_bool else "Offline 🔴"
                         print(f"🔄 Estado de {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
 
@@ -280,7 +302,11 @@ async def procesar_payload(topic: str, payload: str):
         print(f"❌ Error en Worker {os.getpid()}: {e}", flush=True)
 
 
-def on_message(client, userdata, msg):
+_client_db = None
+_client_ws = None
+
+
+def on_message_db(client, userdata, msg):
     try:
         payload = msg.payload.decode("utf-8")
     except Exception:
@@ -289,8 +315,44 @@ def on_message(client, userdata, msg):
         asyncio.run_coroutine_threadsafe(procesar_payload(msg.topic, payload), _main_loop)
 
 
+def on_message_ws(client, userdata, msg):
+    try:
+        payload = msg.payload.decode("utf-8")
+        data = json.loads(payload)
+    except Exception:
+        return
+
+    try:
+        partes_topic = msg.topic.split("/")
+        if len(partes_topic) < 4:
+            return
+
+        mac_desde_topic = partes_topic[2]
+        tipo_mensaje = partes_topic[3]
+
+        if _main_loop and _main_loop.is_running():
+            from app.ws_manager import ws_manager
+            if tipo_mensaje == "telemetria":
+                asyncio.run_coroutine_threadsafe(
+                    ws_manager.broadcast_telemetry(mac_desde_topic, data), _main_loop
+                )
+            elif tipo_mensaje == "conexion":
+                estado_actual = data.get("is_online")
+                if estado_actual is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        ws_manager.broadcast_event(mac_desde_topic, "conexion", {"is_online": bool(estado_actual)}), _main_loop
+                    )
+            elif tipo_mensaje == "broadcast":
+                event_type = partes_topic[4] if len(partes_topic) > 4 else "event"
+                asyncio.run_coroutine_threadsafe(
+                    ws_manager.broadcast_event(mac_desde_topic, event_type, data), _main_loop
+                )
+    except Exception as e:
+        print(f"❌ Error WS callback en Worker {os.getpid()}: {e}", flush=True)
+
+
 def iniciar_oyente_mqtt():
-    global _main_loop
+    global _main_loop, _client_db, _client_ws
     try:
         _main_loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -298,16 +360,45 @@ def iniciar_oyente_mqtt():
         return None
 
     pid_actual = os.getpid()
-    client = mqtt.Client(
+
+    # 1. DB & Alerts Listener (Shared Subscription)
+    _client_db = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"FastAPI_Consumidor_{pid_actual}",
+        client_id=f"FastAPI_DB_{pid_actual}",
     )
+    _client_db.username_pw_set(settings.MQTT_USER, settings.MQTT_PASS)
+    _client_db.on_connect = on_connect_db
+    _client_db.on_message = on_message_db
+    _client_db.connect(settings.MQTT_HOST, settings.MQTT_PORT, 60)
+    _client_db.loop_start()
 
-    client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASS)
-    client.on_connect = on_connect
-    client.on_message = on_message
+    # 2. Local WS Broadcaster (Non-shared Subscription)
+    _client_ws = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"FastAPI_WS_{pid_actual}",
+    )
+    _client_ws.username_pw_set(settings.MQTT_USER, settings.MQTT_PASS)
+    _client_ws.on_connect = on_connect_ws
+    _client_ws.on_message = on_message_ws
+    _client_ws.connect(settings.MQTT_HOST, settings.MQTT_PORT, 60)
+    _client_ws.loop_start()
 
-    client.connect(settings.MQTT_HOST, settings.MQTT_PORT, 60)
+    return _client_db
 
-    client.loop_start()
-    return client
+
+def detener_oyente_mqtt():
+    global _client_db, _client_ws
+    if _client_db:
+        try:
+            _client_db.loop_stop()
+            _client_db.disconnect()
+        except Exception:
+            pass
+        _client_db = None
+    if _client_ws:
+        try:
+            _client_ws.loop_stop()
+            _client_ws.disconnect()
+        except Exception:
+            pass
+        _client_ws = None

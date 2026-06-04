@@ -42,7 +42,7 @@ from app.crud import (
     obtener_notificaciones_usuario, actualizar_notificacion_usuario,
     eliminar_todas_notificaciones_usuario,
 )
-from app.mqtt_listener import iniciar_oyente_mqtt
+from app.mqtt_listener import iniciar_oyente_mqtt, detener_oyente_mqtt
 from app.recommendation_engine import run_recommendation_engine
 from app.schedule_engine import run_schedule_engine, check_should_be_on
 from app.ws_manager import ws_manager
@@ -154,8 +154,7 @@ async def lifespan(app: FastAPI):
     if leader_elect.is_leader:
         await leader_elect.release()
         
-    cliente_mqtt.loop_stop()
-    cliente_mqtt.disconnect()
+    detener_oyente_mqtt()
 
 
 
@@ -429,7 +428,7 @@ async def comando_estado(
                 if start_min <= current_minutes < end_min:
                     in_schedule = True
                     
-        if in_schedule:
+        if in_schedule and dispositivo.estado_reportado and not comando.encendido:
             if not comando.override_automation:
                 raise AppException(error="automation_active", message="El dispositivo está operando dentro del horario establecido. Se requiere override_automation=true para proceder.", status_code=409)
             # Disable automation

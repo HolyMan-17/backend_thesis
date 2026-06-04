@@ -192,6 +192,7 @@ async def test_ai_auto_kill_disables_schedule():
         dev = result.scalar_one()
 
         assert dev.estado_deseado is False, f"Device should be turned off, got {dev.estado_deseado}"
+        assert dev.estado_reportado is False, f"Reported state should be off, got {dev.estado_reportado}"
         assert dev.auto_kill_at is None, "auto_kill_at should be cleared"
         assert dev.horario is not None, "Schedule should still exist"
         assert dev.horario.automatizacion_activa is False, "Schedule automation should be disabled!"
@@ -255,6 +256,7 @@ async def test_p3_auto_kill_disables_schedule():
         dev = result.scalar_one()
 
         assert dev.estado_deseado is False, f"P3 device should be turned off, got {dev.estado_deseado}"
+        assert dev.estado_reportado is False, f"P3 reported state should be off, got {dev.estado_reportado}"
         assert dev.horario.automatizacion_activa is False, "P3 schedule automation should be disabled!"
         print("  [OK] P3 Auto-Kill correctly disabled schedule automation!")
 
@@ -368,6 +370,7 @@ async def test_threshold_violation_disables_schedule():
         dev = result.scalar_one()
 
         assert dev.estado_deseado is False, f"Device should be turned off, got {dev.estado_deseado}"
+        assert dev.estado_reportado is False, f"Reported state should be off, got {dev.estado_reportado}"
         assert dev.horario.automatizacion_activa is False, "Schedule automation should be disabled!"
         print("  [OK] Threshold violation correctly disabled schedule automation!")
 
@@ -409,6 +412,233 @@ async def test_no_schedule_does_not_crash():
     print("  [PASS] Test 5 passed!")
 
 
+async def test_manual_override_lock_behavior():
+    """Test 6: Manual toggle automation lock and override behaviors."""
+    print("\n--- TEST 6: Manual Toggle Automation Lock & Bypass ---")
+    engine, TestSession = await setup_database()
+
+    from app.main import comando_estado
+    from app.schemas import ComandoEstado
+    from app.exceptions import AppException
+
+    async with TestSession() as db:
+        device, user = await seed_device_with_schedule(db, "AA:BB:CC:DD:EE:06", "Manual Lock Test")
+        
+        # Ensure it is currently reported as ON and schedule is active
+        device.estado_reportado = True
+        device.estado_deseado = True
+        await db.commit()
+
+        # Patch the MQTT publish to avoid network errors
+        with patch("app.main.publish.single") as mock_publish:
+            # Scenario A: Try to turn device OFF without override_automation=True.
+            # Since in_schedule is True and estado_reportado is True and comando.encendido is False, it should block.
+            try:
+                await comando_estado(
+                    mac="AA:BB:CC:DD:EE:06",
+                    comando=ComandoEstado(encendido=False, override_automation=False),
+                    db=db,
+                    user=user,
+                )
+                assert False, "Should have failed with AppException (automation_active)"
+            except AppException as exc:
+                assert exc.error == "automation_active", f"Expected automation_active error, got: {exc.error}"
+                print("  [OK] Successfully blocked turning OFF the device during active schedule without override.")
+
+            # Scenario B: Try to turn device OFF with override_automation=True.
+            # This should succeed and disable automation.
+            await comando_estado(
+                mac="AA:BB:CC:DD:EE:06",
+                comando=ComandoEstado(encendido=False, override_automation=True),
+                db=db,
+                user=user,
+            )
+            # Fetch from DB and check state
+            stmt = select(ArtefactoHorario).where(ArtefactoHorario.id_artefacto == device.id)
+            res = await db.execute(stmt)
+            schedule = res.scalar_one()
+            assert schedule.automatizacion_activa is False, "Schedule should be disabled after manual OFF with override"
+            print("  [OK] Successfully turned OFF device and disabled schedule using override.")
+
+            # Re-activate schedule and set reported state to False (physically OFF, e.g. after safety shutdown)
+            schedule.automatizacion_activa = True
+            device.estado_reportado = False
+            await db.commit()
+
+            # Scenario C: Try to turn device ON without override_automation=True.
+            # Since the device is physically OFF (estado_reportado is False), and/or we are turning it ON,
+            # this should succeed and NOT trigger the lock.
+            await comando_estado(
+                mac="AA:BB:CC:DD:EE:06",
+                comando=ComandoEstado(encendido=True, override_automation=False),
+                db=db,
+                user=user,
+            )
+            
+            # Fetch from DB to verify it turned on and schedule is still active
+            stmt_dev = select(Artefacto).where(Artefacto.mac == "AA:BB:CC:DD:EE:06")
+            res_dev = await db.execute(stmt_dev)
+            dev = res_dev.scalar_one()
+            assert dev.estado_deseado is True, "Device should be commanded to turn ON"
+            
+            # Check schedule is still active
+            stmt_sched = select(ArtefactoHorario).where(ArtefactoHorario.id_artefacto == device.id)
+            res_sched = await db.execute(stmt_sched)
+            sched = res_sched.scalar_one()
+            assert sched.automatizacion_activa is True, "Schedule should remain active"
+            print("  [OK] Successfully turned ON device during active schedule window without lock trigger.")
+
+    await engine.dispose()
+    print("  [PASS] Test 6 passed!")
+
+
+async def test_ai_auto_kill_respects_user_lease():
+    """Test 7: AI Auto-Kill respects active user override leases."""
+    print("\n--- TEST 7: AI Auto-Kill Respects User Override Leases ---")
+    engine, TestSession = await setup_database()
+
+    import app.recommendation_engine as rec_engine
+    rec_engine.AsyncSessionLocal = TestSession
+    rec_engine._publish_mqtt = AsyncMock()
+    rec_engine._broadcast_event = AsyncMock()
+    rec_engine.enviar_push_a_duenos = AsyncMock()
+
+    async with TestSession() as db:
+        # A: Regular device with lease
+        device, user = await seed_device_with_schedule(db, "AA:BB:CC:DD:EE:07", "AI Lease Test")
+        # Set auto_kill_at in the past
+        past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
+        device.auto_kill_at = past
+        # Set active user override lease
+        device.override_activo = True
+        device.vencimiento_lease = datetime.now(timezone.utc) + timedelta(minutes=4)
+        await db.commit()
+
+        # B: P3 device with lease
+        device_p3, user_p3 = await seed_device_with_schedule(db, "AA:BB:CC:DD:EE:08", "P3 Lease Test", prioridad="P3")
+        device_p3.override_activo = True
+        device_p3.vencimiento_lease = datetime.now(timezone.utc) + timedelta(minutes=4)
+        await db.commit()
+
+    # Seed RISKY telemetry for both
+    async with TestSession() as db:
+        for mac in ["AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:08"]:
+            stmt = select(Artefacto).where(Artefacto.mac == mac)
+            res = await db.execute(stmt)
+            dev = res.scalar_one()
+            for i in range(5):
+                t = Telemetria(
+                    id_artefacto=dev.id,
+                    voltaje=120.0,
+                    corriente=5.0,
+                    potencia=60.0,
+                    tiempo_operacion_s=i * 60,
+                    ai_status=1,
+                    timestamp=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5 - i),
+                )
+                db.add(t)
+            await db.commit()
+
+    # Run recommendation scan
+    await rec_engine.scan_all_devices()
+
+    # Verify both auto-kills were skipped and device states remain True/ON
+    async with TestSession() as db:
+        for mac in ["AA:BB:CC:DD:EE:07", "AA:BB:CC:DD:EE:08"]:
+            stmt = select(Artefacto).where(Artefacto.mac == mac)
+            res = await db.execute(stmt)
+            dev = res.scalar_one()
+            assert dev.estado_deseado is True, f"Device {mac} should remain ON due to user lease!"
+            assert dev.override_activo is True, f"Device {mac} lease should remain active"
+            print(f"  [OK] AI Auto-Kill successfully skipped for {mac} due to active lease.")
+
+    await engine.dispose()
+    print("  [PASS] Test 7 passed!")
+
+
+async def test_split_mqtt_clients_handling():
+    """Test 8: Split MQTT clients handle and route messages correctly."""
+    print("\n--- TEST 8: Split MQTT Clients Routing Verification ---")
+    
+    from app.mqtt_listener import on_message_db, on_message_ws
+    
+    # Mock message class
+    class MockMsg:
+        def __init__(self, topic, payload):
+            self.topic = topic
+            self.payload = payload.encode("utf-8") if isinstance(payload, str) else payload
+
+    # Mock the global main loop and processing helpers
+    with patch("app.mqtt_listener._main_loop") as mock_loop, \
+         patch("app.mqtt_listener.procesar_payload", new_callable=AsyncMock) as mock_proc_payload, \
+         patch("app.ws_manager.ws_manager.broadcast_telemetry", new_callable=AsyncMock) as mock_broadcast_telemetry, \
+         patch("app.ws_manager.ws_manager.broadcast_event", new_callable=AsyncMock) as mock_broadcast_event, \
+         patch("asyncio.run_coroutine_threadsafe") as mock_run_coroutine_threadsafe:
+        
+        # Make loop running check succeed
+        mock_loop.is_running.return_value = True
+        
+        # Scenario A: Telemetry message to DB client (shared)
+        msg_db = MockMsg("smartups/dispositivos/AA:BB:CC:DD:EE:09/telemetria", '{"voltaje": 120, "corriente": 1, "potencia": 120, "mac_dispositivo": "AA:BB:CC:DD:EE:09", "tiempo_operacion_s": 100}')
+        on_message_db(None, None, msg_db)
+        
+        # Verify it scheduled procesar_payload
+        mock_proc_payload.assert_called_once_with("smartups/dispositivos/AA:BB:CC:DD:EE:09/telemetria", '{"voltaje": 120, "corriente": 1, "potencia": 120, "mac_dispositivo": "AA:BB:CC:DD:EE:09", "tiempo_operacion_s": 100}')
+        assert mock_run_coroutine_threadsafe.called, "Should run coroutine threadsafe"
+        assert mock_run_coroutine_threadsafe.call_args[0][1] == mock_loop
+        print("  [OK] DB client message correctly routed to procesar_payload.")
+
+        # Reset mocks
+        mock_proc_payload.reset_mock()
+        mock_run_coroutine_threadsafe.reset_mock()
+
+        # Scenario B: Telemetry message to WS client (non-shared)
+        msg_ws = MockMsg("smartups/dispositivos/AA:BB:CC:DD:EE:09/telemetria", '{"voltaje": 120, "corriente": 1, "potencia": 120, "mac_dispositivo": "AA:BB:CC:DD:EE:09", "tiempo_operacion_s": 100}')
+        on_message_ws(None, None, msg_ws)
+        
+        # Verify it did not call procesar_payload, but broadcasted to WebSockets
+        assert not mock_proc_payload.called, "WS client telemetry should not call procesar_payload"
+        mock_broadcast_telemetry.assert_called_once_with(
+            "AA:BB:CC:DD:EE:09",
+            {"voltaje": 120, "corriente": 1, "potencia": 120, "mac_dispositivo": "AA:BB:CC:DD:EE:09", "tiempo_operacion_s": 100}
+        )
+        assert mock_run_coroutine_threadsafe.called, "Should run coroutine threadsafe"
+        assert mock_run_coroutine_threadsafe.call_args[0][1] == mock_loop
+        print("  [OK] WS client telemetry message correctly routed directly to WebSocket broadcast (no DB write).")
+
+        # Reset mocks
+        mock_broadcast_telemetry.reset_mock()
+        mock_run_coroutine_threadsafe.reset_mock()
+
+        # Scenario C: Connection message to WS client
+        msg_conn = MockMsg("smartups/dispositivos/AA:BB:CC:DD:EE:09/conexion", '{"is_online": true}')
+        on_message_ws(None, None, msg_conn)
+        
+        # Verify it broadcasted connection event
+        mock_broadcast_event.assert_called_once_with("AA:BB:CC:DD:EE:09", "conexion", {"is_online": True})
+        assert mock_run_coroutine_threadsafe.called, "Should run coroutine threadsafe"
+        assert mock_run_coroutine_threadsafe.call_args[0][1] == mock_loop
+        print("  [OK] WS client connection message correctly broadcasted connection event.")
+
+        # Reset mocks
+        mock_broadcast_event.reset_mock()
+        mock_run_coroutine_threadsafe.reset_mock()
+
+        # Scenario D: Broadcast event message to WS client (e.g. from recommendation engine auto_kill_warning)
+        msg_bc = MockMsg("smartups/dispositivos/AA:BB:CC:DD:EE:09/broadcast/auto_kill_warning", '{"message": "Auto-kill warning!"}')
+        on_message_ws(None, None, msg_bc)
+        
+        # Verify it broadcasted the auto_kill_warning event
+        mock_broadcast_event.assert_called_once_with("AA:BB:CC:DD:EE:09", "auto_kill_warning", {"message": "Auto-kill warning!"})
+        assert mock_run_coroutine_threadsafe.called, "Should run coroutine threadsafe"
+        assert mock_run_coroutine_threadsafe.call_args[0][1] == mock_loop
+        print("  [OK] WS client broadcast event correctly routed to WS manager with parsed event type.")
+
+    print("  [PASS] Test 8 passed!")
+
+    print("  [PASS] Test 8 passed!")
+
+
 async def main():
     print("=" * 60)
     print("Security Overrides Test Suite")
@@ -419,6 +649,9 @@ async def main():
     await test_bms_emergency_disables_schedule()
     await test_threshold_violation_disables_schedule()
     await test_no_schedule_does_not_crash()
+    await test_manual_override_lock_behavior()
+    await test_ai_auto_kill_respects_user_lease()
+    await test_split_mqtt_clients_handling()
 
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED!")
