@@ -51,19 +51,110 @@ from app.exceptions import (
 from app.models import Usuario, Artefacto, Recomendacion
 from fastapi.exceptions import RequestValidationError
 
+from sqlalchemy import text
+from app.database import engine
+
 logger = logging.getLogger("uvicorn.error")
+
+
+class LeaderElection:
+    def __init__(self, db_engine):
+        self.db_engine = db_engine
+        self._conn = None
+        self.is_leader = False
+
+    async def acquire(self) -> bool:
+        try:
+            self._conn = await self.db_engine.connect()
+            result = await self._conn.execute(
+                text("SELECT GET_LOCK('smartsaver_leader_lock', 0)")
+            )
+            val = result.scalar()
+            if val == 1:
+                self.is_leader = True
+                return True
+            else:
+                await self._conn.close()
+                self._conn = None
+                return False
+        except Exception as e:
+            logger.error(f"Error acquiring leader lock: {e}")
+            if self._conn:
+                await self._conn.close()
+                self._conn = None
+            return False
+
+    async def heartbeat(self) -> bool:
+        if not self._conn:
+            return False
+        try:
+            await self._conn.execute(text("SELECT 1"))
+            return True
+        except Exception:
+            self.is_leader = False
+            try:
+                await self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+            return False
+
+    async def release(self):
+        if self._conn:
+            try:
+                await self._conn.execute(text("SELECT RELEASE_LOCK('smartsaver_leader_lock')"))
+            except Exception:
+                pass
+            finally:
+                await self._conn.close()
+                self._conn = None
+            self.is_leader = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import os
     cliente_mqtt = iniciar_oyente_mqtt()
     engine_task = asyncio.create_task(run_recommendation_engine())
-    schedule_task = asyncio.create_task(run_schedule_engine())
+    
+    leader_elect = LeaderElection(engine)
+    schedule_tasks = []
+    
+    async def leader_coordinator():
+        while True:
+            try:
+                if leader_elect.is_leader:
+                    alive = await leader_elect.heartbeat()
+                    if not alive:
+                        logger.warning(f"Worker {os.getpid()} lost leader lock. Cancelling schedule engine.")
+                        for t in schedule_tasks:
+                            t.cancel()
+                        schedule_tasks.clear()
+                
+                if not leader_elect.is_leader:
+                    acquired = await leader_elect.acquire()
+                    if acquired:
+                        logger.info(f"Worker {os.getpid()} elected as leader. Starting schedule engine.")
+                        schedule_task = asyncio.create_task(run_schedule_engine())
+                        schedule_tasks.append(schedule_task)
+            except Exception as err:
+                logger.error(f"Leader coordinator error in worker {os.getpid()}: {err}")
+            await asyncio.sleep(30)
+            
+    coord_task = asyncio.create_task(leader_coordinator())
+    
     yield
+    
+    coord_task.cancel()
+    for t in schedule_tasks:
+        t.cancel()
+    if leader_elect.is_leader:
+        await leader_elect.release()
+        
     engine_task.cancel()
-    schedule_task.cancel()
     cliente_mqtt.loop_stop()
     cliente_mqtt.disconnect()
+
 
 
 app = FastAPI(title="SmartSaver API", lifespan=lifespan)
