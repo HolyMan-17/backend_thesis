@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
-from app.models import ArtefactoHorario, Artefacto
+from app.models import ArtefactoHorario, Artefacto, EventoUsuario
 from app.crud import comando_estado_con_lease, verificar_lease_activo
 from app.config import settings
 
@@ -58,18 +58,42 @@ def check_should_be_on(
 
 async def _ejecutar_transicion(db: AsyncSession, dispositivo: Artefacto, encendido: bool) -> None:
     """
-    Performs a single state transition: updates DB state, publishes to MQTT,
-    and sends push notifications.
+    Performs a single state transition: updates DB state (without setting user lease),
+    publishes to MQTT, and sends push notifications.
     """
-    # 1. Update DB state with lease
-    await comando_estado_con_lease(
-        db, 
-        dispositivo.mac, 
-        encendido=encendido, 
-        duracion_minutos=5, 
-        id_usuario=None
-    )
-    
+    try:
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.id == dispositivo.id)
+            .with_for_update()
+        )
+        result = await db.execute(stmt)
+        dispositivo_db = result.scalar_one()
+
+        dispositivo_db.estado_deseado = encendido
+        if not encendido:
+            dispositivo_db.auto_kill_at = None
+        
+        # Clear override lease as schedule transitions are automated and take precedence
+        dispositivo_db.override_activo = False
+        dispositivo_db.vencimiento_lease = None
+        
+        await db.flush()
+
+        evento = EventoUsuario(
+            id_artefacto=dispositivo_db.id,
+            accion="comando_estado",
+            razon_disparo=f"Relay {'encendido' if encendido else 'apagado'} según horario programado",
+        )
+        db.add(evento)
+
+        await db.commit()
+        await db.refresh(dispositivo_db)
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Failed to update device state in transition for {dispositivo.mac}: {e}")
+        raise
+
     # 2. Publish command via MQTT
     try:
         import paho.mqtt.publish as publish
@@ -156,39 +180,65 @@ async def _evaluate_schedules() -> None:
                 if prev_info is None:
                     # Case 1: First run / startup sync.
                     # If this is a global startup/reboot of the schedule engine,
-                    # we only initialize the cache and do NOT force transitions.
-                    # This preserves manual overrides.
+                    # we seed the cache and run device shadow sync if desired differs from reported.
                     if _is_first_evaluation:
                         logger.info(f"Schedule engine startup: seeding cache for {dispositivo.mac} with state should_be_on={should_be_on}")
+                        
+                        # Device Shadow Startup Sync: if physical state (estado_reportado) differs
+                        # from the desired state (estado_deseado), re-publish the command to get them in sync.
+                        if dispositivo.estado_deseado != dispositivo.estado_reportado:
+                            logger.info(f"Startup Device Shadow Sync: publishing state {dispositivo.estado_deseado} for {dispositivo.mac}")
+                            try:
+                                from paho.mqtt.publish import single as mqtt_publish_single
+                                import json
+                                topic = f"smartups/dispositivos/{dispositivo.mac}/comando/estado"
+                                payload = json.dumps({"encendido": dispositivo.estado_deseado})
+                                credenciales = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
+                                mqtt_publish_single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales)
+                            except Exception as err:
+                                logger.error(f"Failed to publish startup device shadow sync for {dispositivo.mac}: {err}")
+
+                        _last_schedule_states[schedule.id_artefacto] = {
+                            "should_be_on": should_be_on,
+                            "config_sig": config_sig
+                        }
                     else:
                         # Otherwise, a schedule was newly activated/registered.
-                        # Force sync to the expected schedule state immediately unless lease is active.
-                        if should_be_on != dispositivo.estado_deseado:
+                        # Force sync immediately unless lease is active.
+                        if should_be_on != dispositivo.estado_reportado:
                             lease_activo = await verificar_lease_activo(db, dispositivo.mac)
                             if lease_activo:
                                 logger.info(f"New schedule sync skipped for {dispositivo.mac} due to active user override lease.")
                             else:
                                 await _ejecutar_transicion(db, dispositivo, should_be_on)
-                    
-                    _last_schedule_states[schedule.id_artefacto] = {
-                        "should_be_on": should_be_on,
-                        "config_sig": config_sig
-                    }
+                                _last_schedule_states[schedule.id_artefacto] = {
+                                    "should_be_on": should_be_on,
+                                    "config_sig": config_sig
+                                }
+                        else:
+                            _last_schedule_states[schedule.id_artefacto] = {
+                                "should_be_on": should_be_on,
+                                "config_sig": config_sig
+                            }
 
                 elif prev_info["config_sig"] != config_sig:
                     # Case 2: Schedule was edited by the user.
-                    # Force sync to the newly edited schedule immediately if mismatch exists unless lease is active.
-                    if should_be_on != dispositivo.estado_deseado:
+                    # Force sync to the newly edited schedule immediately unless lease is active.
+                    if should_be_on != dispositivo.estado_reportado:
                         lease_activo = await verificar_lease_activo(db, dispositivo.mac)
                         if lease_activo:
                             logger.info(f"Edited schedule sync skipped for {dispositivo.mac} due to active user override lease.")
                         else:
                             await _ejecutar_transicion(db, dispositivo, should_be_on)
-                    
-                    _last_schedule_states[schedule.id_artefacto] = {
-                        "should_be_on": should_be_on,
-                        "config_sig": config_sig
-                    }
+                            _last_schedule_states[schedule.id_artefacto] = {
+                                "should_be_on": should_be_on,
+                                "config_sig": config_sig
+                            }
+                    else:
+                        _last_schedule_states[schedule.id_artefacto] = {
+                            "should_be_on": should_be_on,
+                            "config_sig": config_sig
+                        }
 
                 else:
                     # Case 3: Normal runtime evaluation.
@@ -201,9 +251,7 @@ async def _evaluate_schedules() -> None:
                             logger.info(f"Schedule transition skipped for {dispositivo.mac} due to active user override lease.")
                         else:
                             await _ejecutar_transicion(db, dispositivo, should_be_on)
-                    
-                    # Update cache state
-                    _last_schedule_states[schedule.id_artefacto]["should_be_on"] = should_be_on
+                            _last_schedule_states[schedule.id_artefacto]["should_be_on"] = should_be_on
 
             except Exception as e:
                 logger.error(f"Error evaluating schedule for device {schedule.id_artefacto}: {e}\n{traceback.format_exc()}")

@@ -539,7 +539,7 @@ async def actualizar_horario(
             start_min=start_min,
             end_min=end_min
         )
-        device_is_on = estado.estado_deseado
+        device_is_on = estado.estado_reportado
 
         if should_be_on != device_is_on:
             await comando_estado_con_lease(

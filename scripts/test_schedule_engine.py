@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.database import Base
-from app.models import Usuario, Artefacto, ArtefactoHorario, EventoUsuario
+from app.models import Usuario, Artefacto, ArtefactoHorario, EventoUsuario, PermisoUsuarioArtefacto, NotificacionUsuario
 import app.schedule_engine
 
 # Use SQLite in-memory database for local testing
@@ -20,14 +20,17 @@ async def test_schedule_engine_logic():
     print("Setting up SQLite in-memory database engine for schedule tests...")
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     
-    # SQLite requires INTEGER (not BIGINT) to autoincrement primary keys
     from sqlalchemy import Integer
     EventoUsuario.__table__.c.id.type = Integer()
+    NotificacionUsuario.__table__.c.id.type = Integer()
 
     tables_to_create = [
+        Usuario.__table__,
         Artefacto.__table__,
+        PermisoUsuarioArtefacto.__table__,
         ArtefactoHorario.__table__,
         EventoUsuario.__table__,
+        NotificacionUsuario.__table__,
     ]
     async with engine.begin() as conn:
         for table in tables_to_create:
@@ -62,13 +65,16 @@ async def test_schedule_engine_logic():
         await db.refresh(device)
         
         # Schedule: active, runs every day (1-7),
-        # start time: 08:00, end time: 11:34 AM
-        # At 12:55 PM (current local time), should_be_on evaluates to False.
+        # start time: 1 hour after now, end time: 2 hours after now.
+        # This ensures should_be_on evaluates to False.
+        now_local = datetime.now()
+        start_time = (now_local + timedelta(hours=1)).time()
+        end_time = (now_local + timedelta(hours=2)).time()
         schedule = ArtefactoHorario(
             id_artefacto=device.id,
             dias_operacion=[1, 2, 3, 4, 5, 6, 7],
-            hora_encendido=time(8, 0),
-            hora_apagado=time(11, 34),
+            hora_encendido=start_time,
+            hora_apagado=end_time,
             automatizacion_activa=True,
         )
         db.add(schedule)
@@ -149,12 +155,16 @@ async def test_schedule_engine_logic():
         await db.commit()
         await db.refresh(device2)
         
-        # Current local hour is 12:55 PM. Set schedule to encompass it: 12:00 PM to 2:00 PM
+        # Set schedule to encompass current time: 1 hour before now to 1 hour after now.
+        # This ensures should_be_on evaluates to True.
+        now_local = datetime.now()
+        start_time = (now_local - timedelta(hours=1)).time()
+        end_time = (now_local + timedelta(hours=1)).time()
         schedule2 = ArtefactoHorario(
             id_artefacto=device2.id,
             dias_operacion=[1, 2, 3, 4, 5, 6, 7],
-            hora_encendido=time(12, 0),
-            hora_apagado=time(14, 0),
+            hora_encendido=start_time,
+            hora_apagado=end_time,
             automatizacion_activa=True,
         )
         db.add(schedule2)
@@ -175,14 +185,15 @@ async def test_schedule_engine_logic():
     print("\n--- 5. Testing Active User Lease Override Skip ---")
     # For Device 2: currently should_be_on is True, cache has should_be_on = True.
     # We set its database status to have an active lease: override_activo = True, vencimiento_lease = now + 5 mins.
-    # We also change its schedule start/end time so that should_be_on evaluates to False (e.g. 8:00 AM to 9:00 AM).
+    # We also change its schedule start/end time so that should_be_on evaluates to False (e.g. 1 hour after now to 2 hours after now).
     # Then we run evaluation. The transition from True to False should be SKIPPED due to active lease,
     # but the cache should still update to False.
     async with AsyncSessionTest() as db:
         # Update schedule 2 to be inactive at current time (should_be_on = False)
         sched2 = await db.get(ArtefactoHorario, device2_id)
-        sched2.hora_encendido = time(8, 0)
-        sched2.hora_apagado = time(9, 0)
+        now_local = datetime.now()
+        sched2.hora_encendido = (now_local + timedelta(hours=1)).time()
+        sched2.hora_apagado = (now_local + timedelta(hours=2)).time()
         
         # Enable active user override lease on Device 2
         dev2 = await db.get(Artefacto, device2_id)
