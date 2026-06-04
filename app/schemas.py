@@ -285,3 +285,23 @@ class DispositivoLimites(BaseModel):
 class DispositivoEstadoResponse(BaseModel):
     mac_dispositivo: str
     is_online: bool
+
+
+# --- USER NOTIFICATION SCHEMAS ---
+class NotificacionUsuarioResponse(BaseModel):
+    id: int
+    titulo: str
+    cuerpo: str
+    leido: bool
+    eliminado: bool
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+        json_encoders = {datetime: _serialize_datetime}
+
+
+class NotificacionUsuarioUpdate(BaseModel):
+    leido: Optional[bool] = None
+    eliminado: Optional[bool] = None
+

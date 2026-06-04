@@ -304,12 +304,27 @@ Publish: `smartups/dispositivos/{mac}/comando/estado`, `.../comando/limites`
 - Invalid/expired token → close code `4001`
 - Production MUST use `wss://`
 
+### Multi-Worker Leader Election
+- When deployed with multiple Uvicorn/Gunicorn worker processes (e.g., 4 workers), background loops like `run_schedule_engine` and `run_recommendation_engine` would execute concurrently on all workers, causing race conditions and duplicate push notifications.
+- Resolved via **Leader Election using MariaDB Connection-Scoped Advisory Locks (`GET_LOCK` / `RELEASE_LOCK`)**:
+  - During FastAPI `lifespan` startup, workers attempt to acquire the advisory lock `"smartsaver_leader_lock"` via an active DB connection.
+  - Only one worker succeeds and becomes the "leader".
+  - Non-leader workers wait and periodically check the lock. If the leader goes offline (releasing the lock or terminating), a standby worker automatically acquires the lock and assumes background processing.
+  - This ensures that only **one instance** of the scheduling and recommendation loops is active at any time.
+
+### Push Notification & Client Synchronization
+- To prevent missing notifications when the app is closed:
+  - The React Native client does not rely solely on push notifications for history. It uses a **Zustand synchronization algorithm** (`syncBackendNotifications` inside `src/store/useNotificationStore.ts`).
+  - It fetches alerts, AI recommendations, and automation events from the backend, maps them into a uniform `NotificationItem` shape in Spanish, and deduplicates them using composite IDs (e.g. `alert_{id}`, `rec_{id}`, `evt_{id}`).
+  - To prevent blank rows in the history UI, empty/silent push notifications (used for remote wakeup or background syncing) are discarded at the listener level (`addNotificationReceivedListener` / `addNotificationResponseReceivedListener` in `app/_layout.tsx`) if they do not contain a valid title and body.
+
 ## Testing
 
 No test framework is configured yet. Verification methods:
 - `python test_db.py` — checks MariaDB connectivity
 - `python -m app.mock_esp32` — simulates full device lifecycle
 - Start server and verify endpoints with curl/httpx
+- Run concurrency simulations via `python scripts/simulate_schedule_concurrency.py` and `python scripts/simulate_recommendation_concurrency.py`.
 
 Planned: pytest + pytest-asyncio + httpx AsyncClient + Docker MariaDB for integration tests.
 
@@ -323,3 +338,6 @@ Planned: pytest + pytest-asyncio + httpx AsyncClient + Docker MariaDB for integr
 | V5.0 → V6.0 | `migration_v6.sql` | Adds `ai_status` integer column to `telemetria` (Edge-AI BMS classification: 0=SAFE, 1=RISKY, 2=CRITICAL) |
 | V6.0 → V7.0 | `migration_v7.sql` | Adds `recomendaciones` table (AI-based usage recommendations) |
 | V7.0 → V8.0 | `migration_v8.sql` | Adds `ai_control_habilitado`, `auto_apagado_low_priority` to `usuarios` (global); `auto_kill_at`, `ai_override_until` to `artefactos` (per-device scheduling) |
+| V8.0 → V9.0 | `migration_v9.sql` | Adds scheduling table for device automation (`artefactos_horarios`) |
+| V9.0 → V10.0| `migration_v10.sql`| Adds `expo_push_token` column to the `usuarios` table for push notifications |
+

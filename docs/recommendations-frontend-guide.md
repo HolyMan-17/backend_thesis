@@ -78,7 +78,7 @@ Both require JWT Bearer auth.
   "id": 1,
   "id_artefacto": 3,
   "tipo_recomendacion": "consumo_riesgo_sostenido",
-  "mensaje": "Living Room Light shows sustained risky consumption (avg AI status: 1.2) for 5+ min. Consider turning it off to preserve battery life.",
+  "mensaje": "Living Room Light muestra un consumo de riesgo sostenido (AI status promedio: 1.2) por más de 5 min. Considera apagarlo para preservar la batería.",
   "accion_sugerida": "turn_off",
   "severidad": "warning",
   "resuelto": false,

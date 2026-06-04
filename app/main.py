@@ -115,10 +115,9 @@ class LeaderElection:
 async def lifespan(app: FastAPI):
     import os
     cliente_mqtt = iniciar_oyente_mqtt()
-    engine_task = asyncio.create_task(run_recommendation_engine())
     
     leader_elect = LeaderElection(engine)
-    schedule_tasks = []
+    bg_tasks = []
     
     async def leader_coordinator():
         while True:
@@ -126,17 +125,18 @@ async def lifespan(app: FastAPI):
                 if leader_elect.is_leader:
                     alive = await leader_elect.heartbeat()
                     if not alive:
-                        logger.warning(f"Worker {os.getpid()} lost leader lock. Cancelling schedule engine.")
-                        for t in schedule_tasks:
+                        logger.warning(f"Worker {os.getpid()} lost leader lock. Cancelling background engines.")
+                        for t in bg_tasks:
                             t.cancel()
-                        schedule_tasks.clear()
+                        bg_tasks.clear()
                 
                 if not leader_elect.is_leader:
                     acquired = await leader_elect.acquire()
                     if acquired:
-                        logger.info(f"Worker {os.getpid()} elected as leader. Starting schedule engine.")
+                        logger.info(f"Worker {os.getpid()} elected as leader. Starting background engines.")
+                        engine_task = asyncio.create_task(run_recommendation_engine())
                         schedule_task = asyncio.create_task(run_schedule_engine())
-                        schedule_tasks.append(schedule_task)
+                        bg_tasks.extend([engine_task, schedule_task])
             except Exception as err:
                 logger.error(f"Leader coordinator error in worker {os.getpid()}: {err}")
             await asyncio.sleep(30)
@@ -146,14 +146,14 @@ async def lifespan(app: FastAPI):
     yield
     
     coord_task.cancel()
-    for t in schedule_tasks:
+    for t in bg_tasks:
         t.cancel()
     if leader_elect.is_leader:
         await leader_elect.release()
         
-    engine_task.cancel()
     cliente_mqtt.loop_stop()
     cliente_mqtt.disconnect()
+
 
 
 

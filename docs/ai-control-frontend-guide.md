@@ -103,8 +103,8 @@ Add a **global settings section** (not per-device) with two toggles:
 | Field | Value |
 |-------|-------|
 | Location | App settings screen (global, not per-device) |
-| Label | "Allow AI to manage my devices" |
-| Description | "When enabled, the AI can automatically turn off devices after a warning period if it detects sustained high power consumption." |
+| Label | "Control Maestro de IA" |
+| Description | "Permitir que la IA gestione mis dispositivos (cuando está activo, la IA puede apagar automáticamente los dispositivos tras una advertencia de 5 minutos)." |
 | API | `PATCH /api/users/settings { "ai_control_habilitado": true/false }` |
 | Default | `false` |
 
@@ -113,8 +113,8 @@ Add a **global settings section** (not per-device) with two toggles:
 | Field | Value |
 |-------|-------|
 | Location | App settings screen (global, not per-device) |
-| Label | "Auto-turn off low-priority devices" |
-| Description | "When enabled, any device set to P3 (low priority) will be immediately turned off when risky consumption is detected — no warning period." |
+| Label | "Apagado de baja prioridad" |
+| Description | "Apagar inmediatamente dispositivos P3 si detecta consumo riesgoso." |
 | API | `PATCH /api/users/settings { "auto_apagado_low_priority": true/false }` |
 | Default | `false` |
 | Note | Independent of the "Allow AI" toggle. Works on its own. |
@@ -222,19 +222,18 @@ Recommendation engine detects sustained RISKY (2+ min)
 
 ```
 ┌─────────────────────────────────────┐
-│  ⚙️ Settings                        │
+│  ⚙️ Ajustes                          │
 │                                     │
-│  ── AI Management ──                │
+│  ── Opciones de automatización ──    │
 │                                     │
-│  [🔧] Allow AI to manage my devices │
-│  When on, AI can auto-turn off      │
-│  devices after a 5-min warning.     │
+│  [🔧] Control Maestro de IA         │
+│  Permitir que la IA gestione        │
+│  mis dispositivos                   │
 │                          [  OFF  ]  │
 │                                     │
-│  [🔋] Auto-turn off low-priority   │
-│  P3 devices will be turned off      │
-│  immediately when risky.            │
-│  (Works independently from above)   │
+│  [🔋] Apagado de baja prioridad     │
+│  Apagar inmediatamente dispositivos │
+│  P3 si detecta consumo riesgoso     │
 │                          [  OFF  ]  │
 │                                     │
 └─────────────────────────────────────┘

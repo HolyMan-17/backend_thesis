@@ -26,6 +26,7 @@ class Usuario(Base):
     expo_push_token = Column(String(255), nullable=True)
 
     permisos = relationship("PermisoUsuarioArtefacto", back_populates="usuario", cascade="all, delete-orphan")
+    notificaciones = relationship("NotificacionUsuario", back_populates="usuario", cascade="all, delete-orphan")
 
 
 class Artefacto(Base):
@@ -196,3 +197,17 @@ class Telemetria(Base):
     tiempo_operacion_s = Column(Integer, nullable=False)
     ai_status = Column(Integer, default=0, nullable=False)
     estado_sin_cambios = Column(Boolean, default=False, nullable=False)
+
+
+class NotificacionUsuario(Base):
+    __tablename__ = 'notificaciones_usuario'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_usuario = Column(Integer, ForeignKey('usuarios.id', ondelete="CASCADE"), nullable=False)
+    titulo = Column(String(255), nullable=False)
+    cuerpo = Column(String(500), nullable=False)
+    leido = Column(Boolean, default=False, nullable=False, index=True)
+    eliminado = Column(Boolean, default=False, nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+
+    usuario = relationship("Usuario", back_populates="notificaciones")

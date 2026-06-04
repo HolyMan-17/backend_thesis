@@ -430,7 +430,7 @@ Frontend should NOT retry — force logout and prompt re-login.
     "id": 1,
     "id_artefacto": 3,
     "tipo_recomendacion": "consumo_riesgo_sostenido",
-    "mensaje": "Kitchen Light shows sustained risky consumption (avg AI status: 1.2) for 5+ min. Consider turning it off to preserve battery life.",
+    "mensaje": "Kitchen Light muestra un consumo de riesgo sostenido (AI status promedio: 1.2) por más de 5 min. Considera apagarlo para preservar la batería.",
     "accion_sugerida": "turn_off",
     "severidad": "warning",
     "resuelto": false,
@@ -597,7 +597,7 @@ ws.onmessage = (event) => {
   "data": {
     "auto_kill_at": "2026-05-28T14:37:00Z",
     "grace_period_min": 5,
-    "message": "⚠️ High drain detected on Kitchen Light. It will be automatically turned off in 5 minutes.",
+    "message": "⚠️ Consumo alto detectado en Kitchen Light. Se apagará automáticamente en 5 minutos.",
     "accion_sugerida": "keep_on"
   }
 }
@@ -609,7 +609,7 @@ ws.onmessage = (event) => {
   "type": "auto_kill_executed",
   "mac": "00:1B:44:11:3A:B7",
   "data": {
-    "message": "Kitchen Light was automatically turned off to preserve battery."
+    "message": "Kitchen Light fue apagado automáticamente para preservar la batería."
   }
 }
 ```
@@ -620,7 +620,7 @@ ws.onmessage = (event) => {
   "type": "auto_kill_cancelled",
   "mac": "00:1B:44:11:3A:B7",
   "data": {
-    "message": "Risk condition cleared for Kitchen Light."
+    "message": "Condición de riesgo resuelta para Kitchen Light."
   }
 }
 ```

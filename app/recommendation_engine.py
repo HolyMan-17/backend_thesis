@@ -129,7 +129,7 @@ async def _evaluate_consumo_riesgo_sostenido(
             db,
             artefacto.id,
             tipo,
-            f"{label} shows sustained risky consumption (avg AI status: {metrics['avg_ai']:.1f}) for {settings.RECOMMENDATION_SUSTAINED_RISKY_MIN}+ min. Consider turning it off to preserve battery life.",
+            f"{label} muestra un consumo de riesgo sostenido (AI status promedio: {metrics['avg_ai']:.1f}) por más de {settings.RECOMMENDATION_SUSTAINED_RISKY_MIN} min. Considera apagarlo para preservar la batería.",
             "turn_off",
             "warning",
         )
@@ -149,7 +149,7 @@ async def _evaluate_oscilacion_frecuente(
             db,
             artefacto.id,
             tipo,
-            f"{label} has {metrics['transitions']} status transitions in {settings.RECOMMENDATION_OSCILLATION_WINDOW_MIN} min. This may indicate an intermittent issue.",
+            f"{label} presenta {metrics['transitions']} transiciones de estado en {settings.RECOMMENDATION_OSCILLATION_WINDOW_MIN} min. Esto puede indicar un problema intermitente.",
             "investigate",
             "warning",
         )
@@ -175,7 +175,7 @@ async def _evaluate_recuperacion_consumo(
                 db,
                 artefacto.id,
                 tipo,
-                f"{label} has recovered to normal consumption after a recent risky episode.",
+                f"{label} se ha recuperado a un consumo normal después de un episodio de riesgo reciente.",
                 None,
                 "info",
             )
@@ -198,20 +198,21 @@ async def _evaluate_fluctuacion_voltaje(
         label = _device_label(artefacto)
         reason = ""
         if sustained_low:
-            reason = f"avg voltage {short_metrics['avg_voltage']:.1f}V below {settings.RECOMMENDATION_VOLTAGE_BROWNOUT:.0f}V threshold"
+            reason = f"voltaje promedio {short_metrics['avg_voltage']:.1f}V por debajo del límite de {settings.RECOMMENDATION_VOLTAGE_BROWNOUT:.0f}V"
         elif frequent_sags:
-            reason = f"{long_metrics['sag_events']} voltage sag events below {settings.RECOMMENDATION_VOLTAGE_BROWNOUT:.0f}V in {settings.RECOMMENDATION_OSCILLATION_WINDOW_MIN} min"
+            reason = f"{long_metrics['sag_events']} caídas de voltaje por debajo de {settings.RECOMMENDATION_VOLTAGE_BROWNOUT:.0f}V en {settings.RECOMMENDATION_OSCILLATION_WINDOW_MIN} min"
 
         await crear_recomendacion_si_necesario(
             db,
             artefacto.id,
             tipo,
-            f"{label} is experiencing voltage instability: {reason}. Consider disconnecting to protect equipment.",
+            f"{label} está experimentando inestabilidad de voltaje: {reason}. Considera desconectarlo para proteger el equipo.",
             "turn_off",
             "warning",
         )
     elif short_metrics["count"] >= 3 and short_metrics["avg_voltage"] >= settings.RECOMMENDATION_VOLTAGE_BROWNOUT:
         await resolver_recomendacion_auto(db, artefacto.id, tipo)
+
 
 
 async def _get_owner_settings(db: AsyncSession, id_artefacto: int) -> Usuario | None:
@@ -236,7 +237,7 @@ async def _handle_ai_control(
                 artefacto.auto_kill_at = None
                 await db.commit()
                 await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
-                    "message": f"Device is off, cancelling auto-kill warning.",
+                    "message": f"El dispositivo está apagado, cancelando advertencia de auto-apagado.",
                 })
                 await enviar_push_a_duenos(
                     db, artefacto.mac,
@@ -276,7 +277,7 @@ async def _handle_ai_control(
 
             await _publish_mqtt(artefacto.mac, {"encendido": False})
             await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-                "message": f"{label} was automatically turned off to preserve battery.",
+                "message": f"{label} fue apagado automáticamente para preservar la batería.",
             })
 
             await crear_evento(
@@ -304,7 +305,7 @@ async def _handle_ai_control(
                 artefacto.auto_kill_at = None
                 await db.commit()
                 await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
-                    "message": f"Risk condition cleared for {_device_label(artefacto)}.",
+                    "message": f"Condición de riesgo resuelta para {_device_label(artefacto)}.",
                 })
                 await enviar_push_a_duenos(
                     db, artefacto.mac,
@@ -322,7 +323,7 @@ async def _handle_ai_control(
 
             await _publish_mqtt(artefacto.mac, {"encendido": False})
             await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-                "message": f"{label} (P3) was automatically turned off to preserve battery.",
+                "message": f"{label} (P3) fue apagado automáticamente para preservar la batería.",
             })
 
             await crear_evento(
@@ -344,7 +345,7 @@ async def _handle_ai_control(
             await _broadcast_event(artefacto.mac, "auto_kill_warning", {
                 "auto_kill_at": artefacto.auto_kill_at.isoformat(),
                 "grace_period_min": settings.AI_CONTROL_GRACE_PERIOD_MIN,
-                "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
+                "message": f"⚠️ Consumo alto detectado en {label}. Se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos.",
                 "accion_sugerida": "keep_on",
             })
             await enviar_push_a_duenos(
@@ -352,6 +353,7 @@ async def _handle_ai_control(
                 "⚠️ Apagado IA Programado",
                 f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
             )
+
     except Exception:
         await db.rollback()
         raise
