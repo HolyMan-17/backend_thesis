@@ -338,20 +338,21 @@ async def _handle_ai_control(
             return
 
         if owner.ai_control_habilitado:
-            artefacto.auto_kill_at = now + timedelta(minutes=settings.AI_CONTROL_GRACE_PERIOD_MIN)
-            await db.commit()
+            if not artefacto.auto_kill_at:
+                artefacto.auto_kill_at = now + timedelta(minutes=settings.AI_CONTROL_GRACE_PERIOD_MIN)
+                await db.commit()
 
-            await _broadcast_event(artefacto.mac, "auto_kill_warning", {
-                "auto_kill_at": artefacto.auto_kill_at.isoformat(),
-                "grace_period_min": settings.AI_CONTROL_GRACE_PERIOD_MIN,
-                "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
-                "accion_sugerida": "keep_on",
-            })
-            await enviar_push_a_duenos(
-                db, artefacto.mac,
-                "⚠️ Apagado IA Programado",
-                f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
-            )
+                await _broadcast_event(artefacto.mac, "auto_kill_warning", {
+                    "auto_kill_at": artefacto.auto_kill_at.isoformat(),
+                    "grace_period_min": settings.AI_CONTROL_GRACE_PERIOD_MIN,
+                    "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
+                    "accion_sugerida": "keep_on",
+                })
+                await enviar_push_a_duenos(
+                    db, artefacto.mac,
+                    "⚠️ Apagado IA Programado",
+                    f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
+                )
     except Exception:
         await db.rollback()
         raise

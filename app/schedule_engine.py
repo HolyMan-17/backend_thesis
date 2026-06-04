@@ -54,44 +54,75 @@ def check_should_be_on(
         return False
 
 
-async def _ejecutar_transicion(db: AsyncSession, dispositivo: Artefacto, encendido: bool) -> None:
+async def _ejecutar_transicion(db: AsyncSession, mac: str, encendido: bool) -> bool:
     """
-    Performs a single state transition: updates DB state, publishes to MQTT,
-    and sends push notifications.
+    Performs a single state transition atomically to prevent multiple Uvicorn workers
+    from triggering the same schedule concurrently.
+    Returns True if the transition was executed, False if it was already handled.
     """
-    # 1. Update DB state with lease
-    await comando_estado_con_lease(
-        db, 
-        dispositivo.mac, 
-        encendido=encendido, 
-        duracion_minutos=5, 
-        id_usuario=None
-    )
+    try:
+        stmt = select(Artefacto).where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None)).with_for_update()
+        result = await db.execute(stmt)
+        dispositivo_locked = result.scalar_one_or_none()
+
+        if not dispositivo_locked:
+            await db.rollback()
+            return False
+
+        if dispositivo_locked.estado_deseado == encendido:
+            # Another worker already processed this transition
+            await db.rollback()
+            return False
+
+        # Update DB state with lease (inline since we hold the lock)
+        dispositivo_locked.estado_deseado = encendido
+        if not encendido:
+            dispositivo_locked.auto_kill_at = None
+        dispositivo_locked.override_activo = True
+        
+        from datetime import datetime, timezone, timedelta
+        dispositivo_locked.vencimiento_lease = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+        from app.models import EventoUsuario
+        evento = EventoUsuario(
+            id_artefacto=dispositivo_locked.id,
+            id_usuario=None,
+            accion="horario_automatico",
+            razon_disparo=f"Horario {'encendido' if encendido else 'apagado'} ejecutado"
+        )
+        db.add(evento)
+        
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error en lock de _ejecutar_transicion para {mac}: {e}")
+        return False
     
     # 2. Publish command via MQTT
     try:
         import paho.mqtt.publish as publish
         import json
-        topic = f"smartups/dispositivos/{dispositivo.mac}/comando/estado"
+        topic = f"smartups/dispositivos/{mac}/comando/estado"
         payload = json.dumps({"encendido": encendido})
         credenciales_mqtt = {'username': settings.MQTT_USER, 'password': settings.MQTT_PASS}
         publish.single(topic, payload, hostname=settings.MQTT_HOST, auth=credenciales_mqtt)
     except Exception as mq_err:
-        logger.error(f"MQTT publish failed during schedule execution for {dispositivo.mac}: {mq_err}")
+        logger.error(f"MQTT publish failed during schedule execution for {mac}: {mq_err}")
     
     # 3. Send Push Notification to owner admins
     try:
         from app.crud import enviar_push_a_duenos
         accion_str = "Encendido" if encendido else "Apagado"
         await enviar_push_a_duenos(
-            db, dispositivo.mac,
+            db, mac,
             f"⏰ Automatización: {accion_str}",
             f"El dispositivo se ha {accion_str.lower()} según el horario programado."
         )
     except Exception as push_err:
-        logger.error(f"Push notification failed during schedule execution for {dispositivo.mac}: {push_err}")
+        logger.error(f"Push notification failed during schedule execution for {mac}: {push_err}")
     
-    logger.info(f"Horario ejecutado para {dispositivo.mac}: {'Encendido' if encendido else 'Apagado'}")
+    logger.info(f"Horario ejecutado para {mac}: {'Encendido' if encendido else 'Apagado'}")
+    return True
 
 
 async def _evaluate_schedules() -> None:
@@ -157,7 +188,7 @@ async def _evaluate_schedules() -> None:
                     # Case 1: First run / startup sync.
                     # Adjust device state if it currently differs from the schedule
                     if should_be_on != dispositivo.estado_deseado:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                        await _ejecutar_transicion(db, dispositivo.mac, should_be_on)
                     
                     _last_schedule_states[schedule.id_artefacto] = {
                         "should_be_on": should_be_on,
@@ -168,7 +199,7 @@ async def _evaluate_schedules() -> None:
                     # Case 2: Schedule was edited by the user.
                     # Force sync to the newly edited schedule immediately if mismatch exists
                     if should_be_on != dispositivo.estado_deseado:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                        await _ejecutar_transicion(db, dispositivo.mac, should_be_on)
                     
                     _last_schedule_states[schedule.id_artefacto] = {
                         "should_be_on": should_be_on,
@@ -181,7 +212,7 @@ async def _evaluate_schedules() -> None:
                     # This allows users to manually override the state inside or outside the window.
                     prev_should_be_on = prev_info["should_be_on"]
                     if should_be_on != prev_should_be_on:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                        await _ejecutar_transicion(db, dispositivo.mac, should_be_on)
                     
                     # Update cache state
                     _last_schedule_states[schedule.id_artefacto]["should_be_on"] = should_be_on
