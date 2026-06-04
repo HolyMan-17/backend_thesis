@@ -93,7 +93,11 @@ async def get_current_user(
 
     from sqlalchemy import func as sa_func
     user.ultimo_acceso = sa_func.now()
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
     request.state.user = user
 

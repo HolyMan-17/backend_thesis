@@ -5,19 +5,18 @@ import paho.mqtt.client as mqtt
 from app.database import AsyncSessionLocal
 from app.crud import (
     crear_telemetria,
-    actualizar_estado_reportado,
-    actualizar_online_dispositivo,
     crear_dispositivo_o_artefacto,
     obtener_dispositivo_por_mac,
     obtener_dispositivo_por_telemetria,
     actualizar_dispositivo,
-    verificar_cambio_online,
     crear_alerta_si_necesario,
     resolver_alertas_por_tipo,
     crear_evento,
     romper_lease_por_seguridad,
     emergencia_bms_shutdown,
     enviar_push_a_duenos,
+    procesar_cambio_conexion,
+    procesar_reporte_estado,
 )
 from app.schemas import TelemetriaCreate
 from app.config import settings
@@ -61,6 +60,10 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
     if not limites:
         return
 
+    violaciones_criticas = []  # Collect all emergency-level violations
+    violacion_consumo = None   # Non-emergency consumption warning (separate)
+
+    # --- Voltage ---
     if limites.limite_voltaje is not None and telemetria_in.voltaje > float(limites.limite_voltaje):
         alerta = await crear_alerta_si_necesario(
             db, artefacto.id, "sobretension",
@@ -68,20 +71,18 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             "alta",
         )
         if alerta:
-            await romper_lease_por_seguridad(db, artefacto.mac)
+            violaciones_criticas.append(
+                f"Voltaje ({telemetria_in.voltaje:.2f}V > {float(limites.limite_voltaje):.2f}V)"
+            )
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
                 razon_disparo=f"Sobretensión {telemetria_in.voltaje:.2f}V rompe lease de usuario",
             )
-            await enviar_push_a_duenos(
-                db, artefacto.mac,
-                "⚡ Límite de Consumo Excedido",
-                f"El dispositivo ha sido apagado de emergencia debido a: Voltaje ({telemetria_in.voltaje:.2f}V > {float(limites.limite_voltaje):.2f}V)."
-            )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobretension")
 
+    # --- Current ---
     if limites.limite_corriente is not None and telemetria_in.corriente > float(limites.limite_corriente):
         alerta = await crear_alerta_si_necesario(
             db, artefacto.id, "sobrecorriente",
@@ -89,20 +90,18 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             "alta",
         )
         if alerta:
-            await romper_lease_por_seguridad(db, artefacto.mac)
+            violaciones_criticas.append(
+                f"Corriente ({telemetria_in.corriente:.2f}A > {float(limites.limite_corriente):.2f}A)"
+            )
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
                 razon_disparo=f"Sobrecorriente {telemetria_in.corriente:.2f}A rompe lease de usuario",
             )
-            await enviar_push_a_duenos(
-                db, artefacto.mac,
-                "⚡ Límite de Consumo Excedido",
-                f"El dispositivo ha sido apagado de emergencia debido a: Corriente ({telemetria_in.corriente:.2f}A > {float(limites.limite_corriente):.2f}A)."
-            )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrecorriente")
 
+    # --- Power ---
     if limites.limite_potencia is not None and telemetria_in.potencia > float(limites.limite_potencia):
         alerta = await crear_alerta_si_necesario(
             db, artefacto.id, "sobrepotencia",
@@ -110,16 +109,13 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             "alta",
         )
         if alerta:
-            await romper_lease_por_seguridad(db, artefacto.mac)
+            violaciones_criticas.append(
+                f"Potencia ({telemetria_in.potencia:.2f}W > {float(limites.limite_potencia):.2f}W)"
+            )
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="safety_override",
                 razon_disparo=f"Sobrepotencia {telemetria_in.potencia:.2f}W rompe lease de usuario",
-            )
-            await enviar_push_a_duenos(
-                db, artefacto.mac,
-                "⚡ Límite de Consumo Excedido",
-                f"El dispositivo ha sido apagado de emergencia debido a: Potencia ({telemetria_in.potencia:.2f}W > {float(limites.limite_potencia):.2f}W)."
             )
     elif limites.limite_consumo_w > 0 and telemetria_in.potencia > float(limites.limite_consumo_w):
         alerta = await crear_alerta_si_necesario(
@@ -128,13 +124,27 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
             "media",
         )
         if alerta:
-            await enviar_push_a_duenos(
-                db, artefacto.mac,
-                "⚠️ Alerta de Consumo Alto",
-                f"La potencia de {telemetria_in.potencia:.2f}W excede el consumo límite configurado de {float(limites.limite_consumo_w):.2f}W."
+            violacion_consumo = (
+                f"La potencia de {telemetria_in.potencia:.2f}W excede el consumo límite "
+                f"configurado de {float(limites.limite_consumo_w):.2f}W."
             )
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrepotencia")
+
+    # --- Single consolidated push notification + lease break ---
+    if violaciones_criticas:
+        await romper_lease_por_seguridad(db, artefacto.mac)
+        await enviar_push_a_duenos(
+            db, artefacto.mac,
+            "⚡ Límite de Consumo Excedido",
+            f"El dispositivo ha sido apagado de emergencia debido a: {', '.join(violaciones_criticas)}."
+        )
+    elif violacion_consumo:
+        await enviar_push_a_duenos(
+            db, artefacto.mac,
+            "⚠️ Alerta de Consumo Alto",
+            violacion_consumo
+        )
 
 
 async def procesar_payload(topic: str, payload: str):
@@ -173,19 +183,12 @@ async def procesar_payload(topic: str, payload: str):
 
                 if estado_actual is not None:
                     estado_bool = bool(estado_actual)
-                    cambio = await verificar_cambio_online(db, mac_desde_topic, estado_bool)
-                    await actualizar_online_dispositivo(db, mac_desde_topic, online=estado_bool)
-
-                    if cambio:
-                        accion = "conexion_online" if estado_bool else "conexion_offline"
-                        razon = "Dispositivo conectado" if estado_bool else "Dispositivo desconectado"
-                        dispositivo = await obtener_dispositivo_por_mac(db, mac_desde_topic)
-                        if dispositivo:
-                            await crear_evento(db, id_artefacto=dispositivo.id, accion=accion, razon_disparo=razon)
-                        await _broadcast_event(mac_desde_topic, "conexion", {"is_online": estado_bool})
-
-                    estado_str = "Online 🟢" if estado_bool else "Offline 🔴"
-                    print(f"🔄 Estado de {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
+                    ok, cambio = await procesar_cambio_conexion(db, mac_desde_topic, online=estado_bool)
+                    if ok:
+                        if cambio:
+                            await _broadcast_event(mac_desde_topic, "conexion", {"is_online": estado_bool})
+                        estado_str = "Online 🟢" if estado_bool else "Offline 🔴"
+                        print(f"🔄 Estado de {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
 
             elif tipo_mensaje == "reporte":
                 subtipo = partes_topic[4] if len(partes_topic) > 4 else ""
@@ -193,18 +196,10 @@ async def procesar_payload(topic: str, payload: str):
                 if subtipo == "estado":
                     encendido = data.get("encendido")
                     if encendido is not None:
-                        cambio = await actualizar_estado_reportado(db, mac_desde_topic, encendido=bool(encendido))
-                        if cambio:
-                            dispositivo = await obtener_dispositivo_por_mac(db, mac_desde_topic)
-                            if dispositivo:
-                                await crear_evento(
-                                    db,
-                                    id_artefacto=dispositivo.id,
-                                    accion="reporte_estado",
-                                    razon_disparo=f"Relay {'encendido' if encendido else 'apagado'}",
-                                )
-                        estado_str = "ON 🟢" if encendido else "OFF 🔴"
-                        print(f"📡 Reporte estado {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
+                        ok, cambio = await procesar_reporte_estado(db, mac_desde_topic, encendido=bool(encendido))
+                        if ok:
+                            estado_str = "ON 🟢" if encendido else "OFF 🔴"
+                            print(f"📡 Reporte estado {mac_desde_topic} -> {estado_str} | Worker {os.getpid()}", flush=True)
 
                 elif subtipo == "limites":
                     datos_actualizar = {}

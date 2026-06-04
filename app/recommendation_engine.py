@@ -228,129 +228,133 @@ async def _get_owner_settings(db: AsyncSession, id_artefacto: int) -> Usuario | 
 async def _handle_ai_control(
     db: AsyncSession, artefacto: Artefacto, rows: list, owner: Usuario
 ) -> None:
-    # If device is already turned off physically or commanded off, do not schedule or execute auto-kill.
-    # Cancel any active warning timer if it exists.
-    if not artefacto.estado_reportado or not artefacto.estado_deseado:
-        if artefacto.auto_kill_at:
+    try:
+        # If device is already turned off physically or commanded off, do not schedule or execute auto-kill.
+        # Cancel any active warning timer if it exists.
+        if not artefacto.estado_reportado or not artefacto.estado_deseado:
+            if artefacto.auto_kill_at:
+                artefacto.auto_kill_at = None
+                await db.commit()
+                await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
+                    "message": f"Device is off, cancelling auto-kill warning.",
+                })
+                await enviar_push_a_duenos(
+                    db, artefacto.mac,
+                    "✅ Apagado IA Cancelado",
+                    f"El dispositivo se ha apagado, se canceló el apagado programado por IA."
+                )
+            return
+
+        # Normalize current time and DB datetimes to timezone-naive UTC to prevent offset mismatch errors
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        ai_override_until = (
+            artefacto.ai_override_until.replace(tzinfo=None)
+            if (artefacto.ai_override_until and getattr(artefacto.ai_override_until, "tzinfo", None))
+            else artefacto.ai_override_until
+        )
+        
+        auto_kill_at = (
+            artefacto.auto_kill_at.replace(tzinfo=None)
+            if (artefacto.auto_kill_at and getattr(artefacto.auto_kill_at, "tzinfo", None))
+            else artefacto.auto_kill_at
+        )
+
+        if ai_override_until and ai_override_until > now:
+            if artefacto.auto_kill_at:
+                artefacto.auto_kill_at = None
+                await db.commit()
+            return
+
+        if auto_kill_at and auto_kill_at <= now:
+            label = _device_label(artefacto)
+            logger.warning(f"Auto-kill executing for {artefacto.mac} ({label})")
+
+            artefacto.estado_deseado = False
             artefacto.auto_kill_at = None
             await db.commit()
-            await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
-                "message": f"Device is off, cancelling auto-kill warning.",
+
+            await _publish_mqtt(artefacto.mac, {"encendido": False})
+            await _broadcast_event(artefacto.mac, "auto_kill_executed", {
+                "message": f"{label} was automatically turned off to preserve battery.",
             })
+
+            await crear_evento(
+                db, id_artefacto=artefacto.id,
+                accion="auto_kill",
+                razon_disparo=f"Relay apagado automáticamente por IA (sustained RISKY)",
+            )
             await enviar_push_a_duenos(
                 db, artefacto.mac,
-                "✅ Apagado IA Cancelado",
-                f"El dispositivo se ha apagado, se canceló el apagado programado por IA."
+                "⚡ Dispositivo Apagado",
+                f"El dispositivo {label} fue apagado automáticamente debido a consumo excesivo prolongado."
             )
-        return
+            return
 
-    # Normalize current time and DB datetimes to timezone-naive UTC to prevent offset mismatch errors
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    
-    ai_override_until = (
-        artefacto.ai_override_until.replace(tzinfo=None)
-        if (artefacto.ai_override_until and getattr(artefacto.ai_override_until, "tzinfo", None))
-        else artefacto.ai_override_until
-    )
-    
-    auto_kill_at = (
-        artefacto.auto_kill_at.replace(tzinfo=None)
-        if (artefacto.auto_kill_at and getattr(artefacto.auto_kill_at, "tzinfo", None))
-        else artefacto.auto_kill_at
-    )
+        if auto_kill_at and auto_kill_at > now:
+            return
 
-    if ai_override_until and ai_override_until > now:
-        if artefacto.auto_kill_at:
-            artefacto.auto_kill_at = None
-            await db.commit()
-        return
+        short_metrics = _compute_metrics(rows, settings.AI_CONTROL_RISKY_THRESHOLD_MIN)
+        min_count = max(2, settings.AI_CONTROL_RISKY_THRESHOLD_MIN)
 
-    if auto_kill_at and auto_kill_at <= now:
+        sustained_risky = short_metrics["count"] >= min_count and short_metrics["avg_ai"] >= 1.0
+
+        if not sustained_risky:
+            if artefacto.auto_kill_at:
+                artefacto.auto_kill_at = None
+                await db.commit()
+                await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
+                    "message": f"Risk condition cleared for {_device_label(artefacto)}.",
+                })
+                await enviar_push_a_duenos(
+                    db, artefacto.mac,
+                    "✅ Apagado IA Cancelado",
+                    f"El consumo de {_device_label(artefacto)} se normalizó y se canceló el apagado programado."
+                )
+            return
+
         label = _device_label(artefacto)
-        logger.warning(f"Auto-kill executing for {artefacto.mac} ({label})")
 
-        artefacto.estado_deseado = False
-        artefacto.auto_kill_at = None
-        await db.commit()
-
-        await _publish_mqtt(artefacto.mac, {"encendido": False})
-        await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-            "message": f"{label} was automatically turned off to preserve battery.",
-        })
-
-        await crear_evento(
-            db, id_artefacto=artefacto.id,
-            accion="auto_kill",
-            razon_disparo=f"Relay apagado automáticamente por IA (sustained RISKY)",
-        )
-        await enviar_push_a_duenos(
-            db, artefacto.mac,
-            "⚡ Dispositivo Apagado",
-            f"El dispositivo {label} fue apagado automáticamente debido a consumo excesivo prolongado."
-        )
-        return
-
-    if auto_kill_at and auto_kill_at > now:
-        return
-
-    short_metrics = _compute_metrics(rows, settings.AI_CONTROL_RISKY_THRESHOLD_MIN)
-    min_count = max(2, settings.AI_CONTROL_RISKY_THRESHOLD_MIN)
-
-    sustained_risky = short_metrics["count"] >= min_count and short_metrics["avg_ai"] >= 1.0
-
-    if not sustained_risky:
-        if artefacto.auto_kill_at:
-            artefacto.auto_kill_at = None
+        if owner.auto_apagado_low_priority and artefacto.nivel_prioridad == "P3":
+            logger.warning(f"P3 auto-kill executing for {artefacto.mac} ({label})")
+            artefacto.estado_deseado = False
             await db.commit()
-            await _broadcast_event(artefacto.mac, "auto_kill_cancelled", {
-                "message": f"Risk condition cleared for {_device_label(artefacto)}.",
+
+            await _publish_mqtt(artefacto.mac, {"encendido": False})
+            await _broadcast_event(artefacto.mac, "auto_kill_executed", {
+                "message": f"{label} (P3) was automatically turned off to preserve battery.",
+            })
+
+            await crear_evento(
+                db, id_artefacto=artefacto.id,
+                accion="auto_kill",
+                razon_disparo=f"Relay apagado automáticamente (P3 auto-apagado, AI status RISKY)",
+            )
+            await enviar_push_a_duenos(
+                db, artefacto.mac,
+                "⚡ Dispositivo Apagado",
+                f"El dispositivo {label} (P3) fue apagado automáticamente debido a consumo excesivo prolongado."
+            )
+            return
+
+        if owner.ai_control_habilitado:
+            artefacto.auto_kill_at = now + timedelta(minutes=settings.AI_CONTROL_GRACE_PERIOD_MIN)
+            await db.commit()
+
+            await _broadcast_event(artefacto.mac, "auto_kill_warning", {
+                "auto_kill_at": artefacto.auto_kill_at.isoformat(),
+                "grace_period_min": settings.AI_CONTROL_GRACE_PERIOD_MIN,
+                "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
+                "accion_sugerida": "keep_on",
             })
             await enviar_push_a_duenos(
                 db, artefacto.mac,
-                "✅ Apagado IA Cancelado",
-                f"El consumo de {_device_label(artefacto)} se normalizó y se canceló el apagado programado."
+                "⚠️ Apagado IA Programado",
+                f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
             )
-        return
-
-    label = _device_label(artefacto)
-
-    if owner.auto_apagado_low_priority and artefacto.nivel_prioridad == "P3":
-        logger.warning(f"P3 auto-kill executing for {artefacto.mac} ({label})")
-        artefacto.estado_deseado = False
-        await db.commit()
-
-        await _publish_mqtt(artefacto.mac, {"encendido": False})
-        await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-            "message": f"{label} (P3) was automatically turned off to preserve battery.",
-        })
-
-        await crear_evento(
-            db, id_artefacto=artefacto.id,
-            accion="auto_kill",
-            razon_disparo=f"Relay apagado automáticamente (P3 auto-apagado, AI status RISKY)",
-        )
-        await enviar_push_a_duenos(
-            db, artefacto.mac,
-            "⚡ Dispositivo Apagado",
-            f"El dispositivo {label} (P3) fue apagado automáticamente debido a consumo excesivo prolongado."
-        )
-        return
-
-    if owner.ai_control_habilitado:
-        artefacto.auto_kill_at = now + timedelta(minutes=settings.AI_CONTROL_GRACE_PERIOD_MIN)
-        await db.commit()
-
-        await _broadcast_event(artefacto.mac, "auto_kill_warning", {
-            "auto_kill_at": artefacto.auto_kill_at.isoformat(),
-            "grace_period_min": settings.AI_CONTROL_GRACE_PERIOD_MIN,
-            "message": f"⚠️ High drain detected on {label}. It will be automatically turned off in {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutes.",
-            "accion_sugerida": "keep_on",
-        })
-        await enviar_push_a_duenos(
-            db, artefacto.mac,
-            "⚠️ Apagado IA Programado",
-            f"El dispositivo {label} se apagará automáticamente en {settings.AI_CONTROL_GRACE_PERIOD_MIN} minutos por consumo excesivo."
-        )
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def _evaluate_device(db: AsyncSession, artefacto: Artefacto) -> None:
@@ -378,6 +382,7 @@ async def _evaluate_device(db: AsyncSession, artefacto: Artefacto) -> None:
         elif owner.ai_control_habilitado:
             await _handle_ai_control(db, artefacto, rows, owner)
     except Exception as e:
+        await db.rollback()
         logger.error(f"Error evaluating recommendations for device: {e}\n{traceback.format_exc()}")
 
 

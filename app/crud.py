@@ -872,15 +872,29 @@ async def crear_alerta_si_necesario(
     severidad: str,
 ) -> AlertaSistema | None:
     try:
+        # Lock rows to serialize concurrent coroutines processing rapid telemetry
         stmt = select(AlertaSistema).where(
             AlertaSistema.id_artefacto == id_artefacto,
             AlertaSistema.tipo_alerta == tipo_alerta,
             AlertaSistema.resuelto == False,
-        )
+        ).with_for_update()
         result = await db.execute(stmt)
         alerta_existente = result.scalars().first()
 
         if alerta_existente:
+            return None
+
+        # Cooldown: don't re-create if an alert of this type was created
+        # within the last 60 seconds (prevents oscillation re-triggering
+        # when readings fluctuate around the threshold)
+        cooldown_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)
+        stmt_recent = select(AlertaSistema).where(
+            AlertaSistema.id_artefacto == id_artefacto,
+            AlertaSistema.tipo_alerta == tipo_alerta,
+            AlertaSistema.timestamp >= cooldown_cutoff,
+        )
+        result_recent = await db.execute(stmt_recent)
+        if result_recent.scalars().first():
             return None
 
         alerta = AlertaSistema(
@@ -1160,9 +1174,94 @@ async def enviar_push_a_duenos(db: AsyncSession, mac: str, title: str, body: str
                     stale_user = await db.get(Usuario, user_id)
                     if stale_user:
                         stale_user.expo_push_token = None
-                        await db.commit()
-                        logger.info(f"Cleared stale push token for user {user_id}")
+                        try:
+                            await db.commit()
+                            logger.info(f"Cleared stale push token for user {user_id}")
+                        except Exception:
+                            await db.rollback()
+                            raise
             except Exception as push_err:
                 logger.error(f"Failed to send push to user {user_id}: {push_err}")
     except Exception as e:
         logger.error(f"Error in enviar_push_a_duenos for {mac}: {e}")
+
+
+async def procesar_cambio_conexion(db: AsyncSession, mac: str, online: bool) -> tuple[bool, bool]:
+    """
+    Updates the online state of a device and creates a connection event if changed,
+    all in a single transaction. Returns (online_updated, state_changed).
+    """
+    try:
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .with_for_update()
+        )
+        result = await db.execute(stmt)
+        dispositivo = result.scalar_one_or_none()
+
+        if not dispositivo:
+            return False, False
+
+        state_changed = (dispositivo.is_online != online)
+        dispositivo.is_online = online
+        dispositivo.last_seen_at = func.now()
+        await db.flush()
+
+        if state_changed:
+            accion = "conexion_online" if online else "conexion_offline"
+            razon = "Dispositivo conectado" if online else "Dispositivo desconectado"
+            evento = EventoUsuario(
+                id_artefacto=dispositivo.id,
+                accion=accion,
+                razon_disparo=razon,
+            )
+            db.add(evento)
+            await db.flush()
+
+        await db.commit()
+        return True, state_changed
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def procesar_reporte_estado(db: AsyncSession, mac: str, encendido: bool) -> tuple[bool, bool]:
+    """
+    Updates the reported state of a device and creates a state event if changed,
+    all in a single transaction. Returns (updated, state_changed).
+    """
+    try:
+        stmt = (
+            select(Artefacto)
+            .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .with_for_update()
+        )
+        result = await db.execute(stmt)
+        dispositivo = result.scalar_one_or_none()
+
+        if not dispositivo:
+            return False, False
+
+        state_changed = (dispositivo.estado_reportado != encendido)
+        if not state_changed:
+            return True, False
+
+        dispositivo.estado_reportado = encendido
+        if not encendido:
+            dispositivo.auto_kill_at = None
+        await db.flush()
+
+        evento = EventoUsuario(
+            id_artefacto=dispositivo.id,
+            accion="reporte_estado",
+            razon_disparo=f"Relay {'encendido' if encendido else 'apagado'}",
+        )
+        db.add(evento)
+        await db.flush()
+
+        await db.commit()
+        return True, True
+    except Exception:
+        await db.rollback()
+        raise
