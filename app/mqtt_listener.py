@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import paho.mqtt.client as mqtt
+import paho.mqtt.publish as mqtt_publish
 from app.database import AsyncSessionLocal
 from app.crud import (
     crear_telemetria,
@@ -131,13 +132,38 @@ async def _verificar_alertas(db, artefacto, telemetria_in):
     else:
         await resolver_alertas_por_tipo(db, artefacto.id, "sobrepotencia")
 
-    # --- Single consolidated push notification + lease break ---
+    # --- Single consolidated push notification + lease break + device shutdown ---
     if violaciones_criticas:
         await romper_lease_por_seguridad(db, artefacto.mac)
+
+        # Turn off the device via DB + MQTT command
+        artefacto.estado_deseado = False
+        
+        # Disable active schedule automation for protection
+        automation_disabled = False
+        if artefacto.horario and artefacto.horario.automatizacion_activa:
+            artefacto.horario.automatizacion_activa = False
+            automation_disabled = True
+
+        await db.commit()
+
+        # Publish MQTT off command to physically turn off the device
+        try:
+            mqtt_publish.single(
+                f"smartups/dispositivos/{artefacto.mac}/comando/estado",
+                json.dumps({"encendido": False}),
+                hostname=settings.MQTT_HOST,
+                port=settings.MQTT_PORT,
+                auth={"username": settings.MQTT_USER, "password": settings.MQTT_PASS},
+            )
+        except Exception as e:
+            print(f"❌ Error publicando apagado de emergencia por límites para {artefacto.mac}: {e}", flush=True)
+
+        auto_suffix = " La automatización por horario fue desactivada por protección." if automation_disabled else ""
         await enviar_push_a_duenos(
             db, artefacto.mac,
             "⚡ Límite de Consumo Excedido",
-            f"El dispositivo ha sido apagado de emergencia debido a: {', '.join(violaciones_criticas)}."
+            f"El dispositivo ha sido apagado de emergencia debido a: {', '.join(violaciones_criticas)}.{auto_suffix}"
         )
     elif violacion_consumo:
         await enviar_push_a_duenos(
@@ -232,17 +258,19 @@ async def procesar_payload(topic: str, payload: str):
 
                 res = await emergencia_bms_shutdown(db, mac_desde_topic, alerta_msg, ai_status)
                 if res:
-                    dispositivo, alerta_creada = res
+                    dispositivo, alerta_creada, automation_disabled = res
                     await _broadcast_event(mac_desde_topic, "alerta", {
                         "alerta": alerta_msg,
                         "ai_status": ai_status,
                         "estado_reportado": False,
+                        "automation_disabled": automation_disabled,
                     })
                     if alerta_creada:
+                        auto_suffix = " La automatización por horario fue desactivada por protección." if automation_disabled else ""
                         await enviar_push_a_duenos(
                             db, mac_desde_topic,
                             "🚨 Alerta Crítica BMS",
-                            f"Apagado de emergencia por {alerta_msg}"
+                            f"Apagado de emergencia por {alerta_msg}.{auto_suffix}"
                         )
                     print(f"🚨 Alerta BMS {mac_desde_topic} -> {alerta_msg} (AI Status: {ai_status}) | Worker {os.getpid()}", flush=True)
                 else:

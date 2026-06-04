@@ -5,10 +5,11 @@ from datetime import datetime, timezone, time
 import zoneinfo
 
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal
 from app.models import ArtefactoHorario, Artefacto
-from app.crud import comando_estado_con_lease
+from app.crud import comando_estado_con_lease, verificar_lease_activo
 from app.config import settings
 
 logger = logging.getLogger("uvicorn.error")
@@ -20,6 +21,7 @@ logger = logging.getLogger("uvicorn.error")
 #     "config_sig": tuple (days, start_min, end_min)
 # }
 _last_schedule_states = {}
+_is_first_evaluation = True
 
 
 def check_should_be_on(
@@ -95,6 +97,7 @@ async def _ejecutar_transicion(db: AsyncSession, dispositivo: Artefacto, encendi
 
 
 async def _evaluate_schedules() -> None:
+    global _is_first_evaluation
     # Use America/Caracas timezone
     tz = zoneinfo.ZoneInfo("America/Caracas")
     now_local = datetime.now(tz)
@@ -103,12 +106,13 @@ async def _evaluate_schedules() -> None:
     current_min = current_time.hour * 60 + current_time.minute
 
     async with AsyncSessionLocal() as db:
-        # Get all online devices with automatizacion_activa=True
+        # Get all devices (even if offline) with automatizacion_activa=True
+        # Eagerly load the related Artefacto to prevent N+1 queries.
         stmt = (
             select(ArtefactoHorario)
+            .options(joinedload(ArtefactoHorario.artefacto))
             .join(Artefacto, Artefacto.id == ArtefactoHorario.id_artefacto)
             .where(
-                Artefacto.is_online == True,
                 Artefacto.deleted_at.is_(None),
                 ArtefactoHorario.automatizacion_activa == True
             )
@@ -124,11 +128,7 @@ async def _evaluate_schedules() -> None:
                 if not schedule.hora_encendido or not schedule.hora_apagado:
                     continue
 
-                # Fetch device to get mac and current estado_deseado
-                stmt_device = select(Artefacto).where(Artefacto.id == schedule.id_artefacto)
-                res_device = await db.execute(stmt_device)
-                dispositivo = res_device.scalar_one_or_none()
-                
+                dispositivo = schedule.artefacto
                 if not dispositivo:
                     continue
 
@@ -155,9 +155,20 @@ async def _evaluate_schedules() -> None:
 
                 if prev_info is None:
                     # Case 1: First run / startup sync.
-                    # Adjust device state if it currently differs from the schedule
-                    if should_be_on != dispositivo.estado_deseado:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                    # If this is a global startup/reboot of the schedule engine,
+                    # we only initialize the cache and do NOT force transitions.
+                    # This preserves manual overrides.
+                    if _is_first_evaluation:
+                        logger.info(f"Schedule engine startup: seeding cache for {dispositivo.mac} with state should_be_on={should_be_on}")
+                    else:
+                        # Otherwise, a schedule was newly activated/registered.
+                        # Force sync to the expected schedule state immediately unless lease is active.
+                        if should_be_on != dispositivo.estado_deseado:
+                            lease_activo = await verificar_lease_activo(db, dispositivo.mac)
+                            if lease_activo:
+                                logger.info(f"New schedule sync skipped for {dispositivo.mac} due to active user override lease.")
+                            else:
+                                await _ejecutar_transicion(db, dispositivo, should_be_on)
                     
                     _last_schedule_states[schedule.id_artefacto] = {
                         "should_be_on": should_be_on,
@@ -166,9 +177,13 @@ async def _evaluate_schedules() -> None:
 
                 elif prev_info["config_sig"] != config_sig:
                     # Case 2: Schedule was edited by the user.
-                    # Force sync to the newly edited schedule immediately if mismatch exists
+                    # Force sync to the newly edited schedule immediately if mismatch exists unless lease is active.
                     if should_be_on != dispositivo.estado_deseado:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                        lease_activo = await verificar_lease_activo(db, dispositivo.mac)
+                        if lease_activo:
+                            logger.info(f"Edited schedule sync skipped for {dispositivo.mac} due to active user override lease.")
+                        else:
+                            await _ejecutar_transicion(db, dispositivo, should_be_on)
                     
                     _last_schedule_states[schedule.id_artefacto] = {
                         "should_be_on": should_be_on,
@@ -181,7 +196,11 @@ async def _evaluate_schedules() -> None:
                     # This allows users to manually override the state inside or outside the window.
                     prev_should_be_on = prev_info["should_be_on"]
                     if should_be_on != prev_should_be_on:
-                        await _ejecutar_transicion(db, dispositivo, should_be_on)
+                        lease_activo = await verificar_lease_activo(db, dispositivo.mac)
+                        if lease_activo:
+                            logger.info(f"Schedule transition skipped for {dispositivo.mac} due to active user override lease.")
+                        else:
+                            await _ejecutar_transicion(db, dispositivo, should_be_on)
                     
                     # Update cache state
                     _last_schedule_states[schedule.id_artefacto]["should_be_on"] = should_be_on
@@ -194,13 +213,17 @@ async def _evaluate_schedules() -> None:
             if key not in active_ids:
                 _last_schedule_states.pop(key, None)
 
+        # First evaluation completed
+        if _is_first_evaluation:
+            _is_first_evaluation = False
+
 async def run_schedule_engine() -> None:
     logger.info("Schedule engine started")
     while True:
         try:
-            # Sync to the next minute boundary for accurate triggering
+            # Sync to the next minute boundary + 0.5s for accurate, safe triggering
             now = datetime.now()
-            sleep_seconds = 60 - now.second
+            sleep_seconds = 60 - (now.second + now.microsecond / 1000000.0) + 0.5
             await asyncio.sleep(sleep_seconds)
             
             await _evaluate_schedules()

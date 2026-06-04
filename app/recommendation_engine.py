@@ -273,22 +273,34 @@ async def _handle_ai_control(
 
             artefacto.estado_deseado = False
             artefacto.auto_kill_at = None
+
+            # Disable active schedule automation for protection
+            automation_disabled = False
+            if artefacto.horario and artefacto.horario.automatizacion_activa:
+                artefacto.horario.automatizacion_activa = False
+                automation_disabled = True
+
             await db.commit()
 
+            auto_suffix = " La automatización por horario fue desactivada por protección." if automation_disabled else ""
             await _publish_mqtt(artefacto.mac, {"encendido": False})
             await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-                "message": f"{label} fue apagado automáticamente para preservar la batería.",
+                "message": f"{label} fue apagado automáticamente para preservar la batería.{auto_suffix}",
+                "automation_disabled": automation_disabled,
             })
 
+            razon = f"Relay apagado automáticamente por IA (sustained RISKY)"
+            if automation_disabled:
+                razon += " — automatización desactivada"
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="auto_kill",
-                razon_disparo=f"Relay apagado automáticamente por IA (sustained RISKY)",
+                razon_disparo=razon,
             )
             await enviar_push_a_duenos(
                 db, artefacto.mac,
                 "⚡ Dispositivo Apagado",
-                f"El dispositivo {label} fue apagado automáticamente debido a consumo excesivo prolongado."
+                f"El dispositivo {label} fue apagado automáticamente debido a consumo excesivo prolongado.{auto_suffix}"
             )
             return
 
@@ -319,22 +331,34 @@ async def _handle_ai_control(
         if owner.auto_apagado_low_priority and artefacto.nivel_prioridad == "P3":
             logger.warning(f"P3 auto-kill executing for {artefacto.mac} ({label})")
             artefacto.estado_deseado = False
+
+            # Disable active schedule automation for protection
+            automation_disabled = False
+            if artefacto.horario and artefacto.horario.automatizacion_activa:
+                artefacto.horario.automatizacion_activa = False
+                automation_disabled = True
+
             await db.commit()
 
+            auto_suffix = " La automatización por horario fue desactivada por protección." if automation_disabled else ""
             await _publish_mqtt(artefacto.mac, {"encendido": False})
             await _broadcast_event(artefacto.mac, "auto_kill_executed", {
-                "message": f"{label} (P3) fue apagado automáticamente para preservar la batería.",
+                "message": f"{label} (P3) fue apagado automáticamente para preservar la batería.{auto_suffix}",
+                "automation_disabled": automation_disabled,
             })
 
+            razon = f"Relay apagado automáticamente (P3 auto-apagado, AI status RISKY)"
+            if automation_disabled:
+                razon += " — automatización desactivada"
             await crear_evento(
                 db, id_artefacto=artefacto.id,
                 accion="auto_kill",
-                razon_disparo=f"Relay apagado automáticamente (P3 auto-apagado, AI status RISKY)",
+                razon_disparo=razon,
             )
             await enviar_push_a_duenos(
                 db, artefacto.mac,
                 "⚡ Dispositivo Apagado",
-                f"El dispositivo {label} (P3) fue apagado automáticamente debido a consumo excesivo prolongado."
+                f"El dispositivo {label} (P3) fue apagado automáticamente debido a consumo excesivo prolongado.{auto_suffix}"
             )
             return
 
@@ -412,7 +436,7 @@ async def scan_all_devices() -> None:
                         Artefacto.mac == mac,
                         Artefacto.deleted_at.is_(None),
                     )
-                    .options(selectinload(Artefacto.limites))
+                    .options(selectinload(Artefacto.limites), selectinload(Artefacto.horario))
                     .with_for_update()
                 )
                 result = await db.execute(stmt)

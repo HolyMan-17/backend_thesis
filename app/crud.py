@@ -121,7 +121,7 @@ async def obtener_dispositivo_por_telemetria(db: AsyncSession, mac: str) -> Arte
     stmt = (
         select(Artefacto)
         .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
-        .options(selectinload(Artefacto.limites))
+        .options(selectinload(Artefacto.limites), selectinload(Artefacto.horario))
         .with_for_update()
     )
     result = await db.execute(stmt)
@@ -1090,11 +1090,12 @@ async def obtener_eventos_usuario(
 # EMERGENCY BMS SHUTDOWN
 # ---------------------------------------------------------------------------
 
-async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, ai_status: int) -> tuple[Artefacto, bool] | None:
+async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, ai_status: int) -> tuple[Artefacto, bool, bool] | None:
     try:
         stmt = (
             select(Artefacto)
             .where(Artefacto.mac == mac, Artefacto.deleted_at.is_(None))
+            .options(selectinload(Artefacto.horario))
             .with_for_update()
         )
         result = await db.execute(stmt)
@@ -1107,6 +1108,12 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
         dispositivo.estado_reportado = False
         dispositivo.override_activo = False
         dispositivo.vencimiento_lease = None
+
+        # Disable active schedule automation for protection
+        automation_disabled = False
+        if dispositivo.horario and dispositivo.horario.automatizacion_activa:
+            dispositivo.horario.automatizacion_activa = False
+            automation_disabled = True
 
         await db.flush()
 
@@ -1129,16 +1136,19 @@ async def emergencia_bms_shutdown(db: AsyncSession, mac: str, alerta_msg: str, a
             db.add(alerta)
             alerta_creada = True
 
+        razon = f"Apagado de emergencia BMS: {alerta_msg} (AI Status: {ai_status})"
+        if automation_disabled:
+            razon += " — automatización desactivada"
         evento = EventoUsuario(
             id_artefacto=dispositivo.id,
             accion="safety_override",
-            razon_disparo=f"Apagado de emergencia BMS: {alerta_msg} (AI Status: {ai_status})",
+            razon_disparo=razon,
         )
         db.add(evento)
 
         await db.commit()
         await db.refresh(dispositivo)
-        return dispositivo, alerta_creada
+        return dispositivo, alerta_creada, automation_disabled
     except Exception:
         await db.rollback()
         raise
